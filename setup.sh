@@ -948,26 +948,32 @@ check_for_updates() {
         return
     fi
 
-    local local_head remote_head
-    local_head=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)
-    remote_head=$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null || \
+    # Always compare local main with remote main (not HEAD, which may be a machine branch)
+    local local_main remote_main
+    local_main=$(git -C "$repo_dir" rev-parse refs/heads/main 2>/dev/null || \
+                 git -C "$repo_dir" rev-parse refs/heads/master 2>/dev/null || echo "")
+    remote_main=$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null || \
                   git -C "$repo_dir" rev-parse origin/master 2>/dev/null || echo "")
 
-    if [[ -z "$remote_head" ]]; then
+    if [[ -z "$remote_main" ]]; then
         warn "Remote branch not found. Skipping"
         return
     fi
 
-    if [[ "$local_head" == "$remote_head" ]]; then
+    if [[ "$local_main" == "$remote_main" ]]; then
         ok "Already up to date"
         return
     fi
 
     # Show number of commits behind
     local behind
-    behind=$(git -C "$repo_dir" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+    behind=$(git -C "$repo_dir" rev-list --count refs/heads/main..origin/main 2>/dev/null || echo "?")
     info "A newer version is available (${behind} commits behind)"
     info "Updating..."
+
+    # Remember current branch to restore later
+    local current_branch
+    current_branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null)
 
     # Protect user's local changes
     local has_changes=false
@@ -978,24 +984,33 @@ check_for_updates() {
         git -C "$repo_dir" stash push -m "mubo-auto-update-$(date +%Y%m%d_%H%M%S)" --quiet 2>/dev/null || true
     fi
 
-    # Ensure we are on main branch before pulling
-    local current_branch
-    current_branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null)
+    # Switch to main, update, then switch back
     if [[ "$current_branch" != "main" && "$current_branch" != "master" ]]; then
-        info "Switching to main branch for update..."
         git -C "$repo_dir" checkout main --quiet 2>/dev/null || \
             git -C "$repo_dir" checkout master --quiet 2>/dev/null || true
     fi
 
-    # Try ff-only first, fall back to rebase, then reset
+    # Try ff-only first, fall back to reset
     if git -C "$repo_dir" pull --ff-only origin main --quiet 2>/dev/null; then
         ok "Update complete"
-    elif git -C "$repo_dir" pull --rebase origin main --quiet 2>/dev/null; then
-        ok "Update complete (rebased)"
     else
-        warn "Normal merge failed. Force-updating to latest version..."
+        info "Fast-forward not possible. Resetting main to latest..."
         git -C "$repo_dir" reset --hard origin/main --quiet 2>/dev/null || true
         ok "Update complete (reset to latest)"
+    fi
+
+    # Switch back to machine branch if we were on one
+    if [[ -n "$current_branch" && "$current_branch" != "main" && "$current_branch" != "master" ]]; then
+        git -C "$repo_dir" checkout "$current_branch" --quiet 2>/dev/null || true
+        # Merge updated main into machine branch
+        info "Merging updates into ${current_branch}..."
+        if git -C "$repo_dir" merge main --no-edit --quiet 2>/dev/null; then
+            ok "Machine branch updated"
+        else
+            warn "Merge conflict. Resetting machine branch to main..."
+            git -C "$repo_dir" reset --hard main --quiet 2>/dev/null || true
+            ok "Machine branch reset to latest main"
+        fi
     fi
 
     # Restore stashed changes
