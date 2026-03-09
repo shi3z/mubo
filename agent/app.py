@@ -50,12 +50,15 @@ def _web_search(query: str, max_results: int = 5) -> str:
 
 
 # --- File Operations ---
+HOME_DIR = Path.home()
+
+
 def _file_read(path: str) -> str:
     """Read a file and return its contents."""
     try:
         p = Path(path)
         if not p.is_absolute():
-            p = APP_FILE.parent / p
+            p = HOME_DIR / p
         if not p.exists():
             return f"Error: file not found: {p}"
         if not p.is_file():
@@ -73,7 +76,7 @@ def _file_write(path: str, content: str) -> str:
     try:
         p = Path(path)
         if not p.is_absolute():
-            p = APP_FILE.parent / p
+            p = HOME_DIR / p
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return f"Written {len(content)} chars to {p}"
@@ -86,7 +89,7 @@ def _list_files(path: str = ".", pattern: str = "*") -> str:
     try:
         p = Path(path)
         if not p.is_absolute():
-            p = APP_FILE.parent / p
+            p = HOME_DIR / p
         if not p.exists():
             return f"Error: directory not found: {p}"
         if not p.is_dir():
@@ -1258,7 +1261,7 @@ def _process_tool_calls(full_response: str):
                 results.append({"call": "python_run", "result": run_result})
 
         elif tool == "file_read":
-            fpath = tc.get("path", "")
+            fpath = tc.get("path", "") or tc.get("file_path", "") or tc.get("filename", "")
             if not fpath:
                 results.append({"error": "file_read: path is required"})
             else:
@@ -1266,8 +1269,8 @@ def _process_tool_calls(full_response: str):
                 results.append({"call": f"file_read: {fpath}", "result": content})
 
         elif tool == "file_write":
-            fpath = tc.get("path", "")
-            content = tc.get("content", "")
+            fpath = tc.get("path", "") or tc.get("file_path", "") or tc.get("filename", "")
+            content = tc.get("content", "") or tc.get("text", "")
             if not fpath:
                 results.append({"error": "file_write: path is required"})
             else:
@@ -1275,8 +1278,8 @@ def _process_tool_calls(full_response: str):
                 results.append({"call": f"file_write: {fpath}", "result": write_result})
 
         elif tool == "list_files":
-            fpath = tc.get("path", ".")
-            pattern = tc.get("pattern", "*")
+            fpath = tc.get("path", "") or tc.get("dir", "") or tc.get("directory", "") or "."
+            pattern = tc.get("pattern", "") or tc.get("glob", "") or "*"
             list_result = _list_files(fpath, pattern)
             results.append({"call": f"list_files: {fpath}", "result": list_result})
 
