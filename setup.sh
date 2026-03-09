@@ -978,29 +978,39 @@ check_for_updates() {
         git -C "$repo_dir" stash push -m "mubo-auto-update-$(date +%Y%m%d_%H%M%S)" --quiet 2>/dev/null || true
     fi
 
-    # Pull
+    # Ensure we are on main branch before pulling
+    local current_branch
+    current_branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null)
+    if [[ "$current_branch" != "main" && "$current_branch" != "master" ]]; then
+        info "Switching to main branch for update..."
+        git -C "$repo_dir" checkout main --quiet 2>/dev/null || \
+            git -C "$repo_dir" checkout master --quiet 2>/dev/null || true
+    fi
+
+    # Try ff-only first, fall back to rebase, then reset
     if git -C "$repo_dir" pull --ff-only origin main --quiet 2>/dev/null; then
         ok "Update complete"
-        # Restore stashed changes
-        if [[ "$has_changes" == true ]]; then
-            if git -C "$repo_dir" stash pop --quiet 2>/dev/null; then
-                ok "Local changes restored"
-            else
-                warn "Conflict occurred while restoring local changes"
-                warn "Please resolve manually: git stash pop"
-            fi
-        fi
-        # setup.sh itself may have been updated, so re-execute
-        info "Restarting with updated script..."
-        exec bash "$repo_dir/setup.sh" "$@"
+    elif git -C "$repo_dir" pull --rebase origin main --quiet 2>/dev/null; then
+        ok "Update complete (rebased)"
     else
-        warn "Fast-forward merge was not possible"
-        warn "Please update manually: git pull"
-        # Restore stash
-        if [[ "$has_changes" == true ]]; then
-            git -C "$repo_dir" stash pop --quiet 2>/dev/null || true
+        warn "Normal merge failed. Force-updating to latest version..."
+        git -C "$repo_dir" reset --hard origin/main --quiet 2>/dev/null || true
+        ok "Update complete (reset to latest)"
+    fi
+
+    # Restore stashed changes
+    if [[ "$has_changes" == true ]]; then
+        if git -C "$repo_dir" stash pop --quiet 2>/dev/null; then
+            ok "Local changes restored"
+        else
+            warn "Conflict occurred while restoring local changes"
+            warn "Please resolve manually: git stash pop"
         fi
     fi
+
+    # setup.sh itself may have been updated, so re-execute
+    info "Restarting with updated script..."
+    exec bash "$repo_dir/setup.sh" "$@"
 }
 
 ensure_repo() {
