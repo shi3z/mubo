@@ -1325,12 +1325,13 @@ async def chat_endpoint(request: Request):
 
     async def stream():
         full_response = ""
+        full_thinking = ""
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream(
                     "POST",
                     f"{OLLAMA_BASE}/api/chat",
-                    json={"model": MODEL, "messages": messages, "stream": True},
+                    json={"model": MODEL, "messages": messages, "stream": True, "options": {"num_predict": -1}},
                 ) as resp:
                     is_thinking = False
                     async for line in resp.aiter_lines():
@@ -1344,6 +1345,7 @@ async def chat_endpoint(request: Request):
 
                             # Handle thinking tokens
                             if thinking:
+                                full_thinking += thinking
                                 if not is_thinking:
                                     is_thinking = True
                                     yield f"data: {json.dumps({'thinking_start': True})}\n\n"
@@ -1358,6 +1360,40 @@ async def chat_endpoint(request: Request):
                                 yield f"data: {json.dumps({'content': content})}\n\n"
                         except json.JSONDecodeError:
                             continue
+
+            # If model only produced thinking but no content, extract intent and act
+            if not full_response.strip() and full_thinking.strip():
+                if is_thinking:
+                    yield f"data: {json.dumps({'thinking_end': True})}\n\n"
+                # Use a smaller, focused prompt to extract tool calls from thinking
+                extract_messages = [
+                    {"role": "system", "content": (
+                        "You are a tool-call extractor. The user's AI assistant thought about a task but failed to output tool calls. "
+                        "Based on the thinking content, output the appropriate ```tool_call``` blocks. "
+                        "Available tools: web_search, python_run, file_read, file_write, list_files. "
+                        "Output ONLY the tool_call blocks, no other text. Example:\n"
+                        "```tool_call\n{\"tool\": \"python_run\", \"code\": \"print('hello')\"}\n```"
+                    )},
+                    {"role": "user", "content": f"Original request: {user_messages[-1].get('content', '') if user_messages else ''}\n\nAssistant's thinking:\n{full_thinking[:2000]}"},
+                ]
+                async with httpx.AsyncClient(timeout=300.0) as client_retry:
+                    async with client_retry.stream(
+                        "POST",
+                        f"{OLLAMA_BASE}/api/chat",
+                        json={"model": MODEL, "messages": extract_messages, "stream": True, "options": {"num_predict": -1}},
+                    ) as resp_retry:
+                        async for line_r in resp_retry.aiter_lines():
+                            if not line_r:
+                                continue
+                            try:
+                                data_r = json.loads(line_r)
+                                msg_r = data_r.get("message", {})
+                                content_r = msg_r.get("content", "")
+                                if content_r:
+                                    full_response += content_r
+                                    yield f"data: {json.dumps({'content': content_r})}\n\n"
+                            except json.JSONDecodeError:
+                                continue
 
             if "```tool_call" in full_response:
                 results = _process_tool_calls(full_response)
@@ -1392,7 +1428,7 @@ async def chat_endpoint(request: Request):
                         async with client2.stream(
                             "POST",
                             f"{OLLAMA_BASE}/api/chat",
-                            json={"model": MODEL, "messages": followup_messages, "stream": True},
+                            json={"model": MODEL, "messages": followup_messages, "stream": True, "options": {"num_predict": -1}},
                         ) as resp2:
                             async for line2 in resp2.aiter_lines():
                                 if not line2:
