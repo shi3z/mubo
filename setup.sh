@@ -821,9 +821,53 @@ print_summary() {
 # ============================================================
 # メイン実行
 # ============================================================
+install_git() {
+    if command -v git &>/dev/null; then
+        return
+    fi
+    info "git が見つかりません。インストールします..."
+    case "$(uname -s)" in
+        Darwin)
+            if command -v brew &>/dev/null; then
+                brew install git
+            else
+                info "Xcode Command Line Tools 経由で git をインストール中..."
+                xcode-select --install 2>/dev/null || true
+                # xcode-select は対話的なので、完了を待つ
+                until command -v git &>/dev/null; do
+                    sleep 3
+                done
+            fi
+            ;;
+        Linux)
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -y && sudo apt-get install -y git
+            elif command -v dnf &>/dev/null; then
+                sudo dnf install -y git
+            elif command -v yum &>/dev/null; then
+                sudo yum install -y git
+            elif command -v pacman &>/dev/null; then
+                sudo pacman -S --noconfirm git
+            elif command -v apk &>/dev/null; then
+                sudo apk add git
+            else
+                err "git を自動インストールできません。手動でインストールしてください"
+                exit 1
+            fi
+            ;;
+    esac
+    if command -v git &>/dev/null; then
+        ok "git インストール完了"
+    else
+        err "git のインストールに失敗しました"
+        exit 1
+    fi
+}
+
 ensure_repo() {
     # curl | bash で実行された場合、リポジトリをcloneして再実行
     if [[ ! -f "$(dirname "$0")/agent/app.py" ]] && [[ ! -f "./agent/app.py" ]]; then
+        install_git
         info "リポジトリが見つかりません。cloneします..."
         local tmpdir
         tmpdir=$(mktemp -d)
