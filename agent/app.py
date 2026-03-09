@@ -371,6 +371,15 @@ def _build_system_prompt() -> str:
         "**When the user asks about current events, news, real-time information, or anything you are unsure about, "
         "you MUST use the web_search tool. Do NOT make up information.**\n"
         "\n"
+        "**When the user asks you to DO something (write a file, run code, read a file, search, etc.), "
+        "you MUST actually execute the action using the appropriate tool. Do NOT just show the code or explain how to do it. "
+        "Actually do it by calling the tool.**\n"
+        "- To write a file → use file_write\n"
+        "- To read a file → use file_read\n"
+        "- To run code/calculate → use python_run\n"
+        "- To list files → use list_files\n"
+        "- To search the web → use web_search\n"
+        "\n"
         "## Built-in Tools\n"
         "To use a tool, include the following JSON format in your response:\n"
         "\n"
@@ -633,6 +642,41 @@ body {{
 @keyframes tool-spin {{
     to {{ transform: rotate(360deg); }}
 }}
+.thinking-block {{
+    background: {c['bg_secondary']};
+    border: 1px solid {c['accent']}15;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-size: 0.8em;
+    color: {c['text_secondary']};
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    cursor: pointer;
+    transition: max-height 0.3s;
+}}
+.thinking-block.collapsed {{
+    max-height: 32px;
+    overflow: hidden;
+}}
+.thinking-label {{
+    font-size: 0.75em;
+    color: {c['accent']};
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}}
+.thinking-label .spinner {{
+    display: inline-block;
+    width: 10px; height: 10px;
+    border: 2px solid {c['accent']};
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: tool-spin 0.8s linear infinite;
+}}
 #input-area {{
     padding: 16px 20px;
     background: {c['bg_secondary']};
@@ -882,6 +926,8 @@ async function send() {{
 
     let assistantDiv = addMessage("assistant", "");
     let fullText = "";
+    let thinkingDiv = null;
+    let thinkingText = "";
 
     try {{
         const res = await fetch("/api/chat", {{
@@ -903,9 +949,36 @@ async function send() {{
                 try {{
                     const j = JSON.parse(data);
                     if (j.new_assistant) {{
-                        // Start a new assistant message for follow-up response
                         assistantDiv = addMessage("assistant", "");
                         fullText = "";
+                    }}
+                    if (j.thinking_start) {{
+                        // Create thinking block before the assistant div
+                        const wrapper = document.createElement("div");
+                        wrapper.style.alignSelf = "flex-start";
+                        wrapper.style.maxWidth = "85%";
+                        const label = document.createElement("div");
+                        label.className = "thinking-label";
+                        label.innerHTML = '<span class="spinner"></span>Thinking...';
+                        label.id = "thinking-label";
+                        wrapper.appendChild(label);
+                        thinkingDiv = document.createElement("div");
+                        thinkingDiv.className = "thinking-block";
+                        thinkingDiv.onclick = function() {{ this.classList.toggle("collapsed"); }};
+                        wrapper.appendChild(thinkingDiv);
+                        chat.insertBefore(wrapper, assistantDiv);
+                        thinkingText = "";
+                    }}
+                    if (j.thinking && thinkingDiv) {{
+                        thinkingText += j.thinking;
+                        thinkingDiv.textContent = thinkingText;
+                        chat.scrollTop = chat.scrollHeight;
+                    }}
+                    if (j.thinking_end) {{
+                        if (thinkingDiv) thinkingDiv.classList.add("collapsed");
+                        const lbl = document.getElementById("thinking-label");
+                        if (lbl) lbl.innerHTML = "Thinking (click to expand)";
+                        thinkingDiv = null;
                     }}
                     if (j.content) {{
                         fullText += j.content;
@@ -1259,13 +1332,28 @@ async def chat_endpoint(request: Request):
                     f"{OLLAMA_BASE}/api/chat",
                     json={"model": MODEL, "messages": messages, "stream": True},
                 ) as resp:
+                    is_thinking = False
                     async for line in resp.aiter_lines():
                         if not line:
                             continue
                         try:
                             data = json.loads(line)
-                            content = data.get("message", {}).get("content", "")
+                            msg = data.get("message", {})
+                            thinking = msg.get("thinking", "")
+                            content = msg.get("content", "")
+
+                            # Handle thinking tokens
+                            if thinking:
+                                if not is_thinking:
+                                    is_thinking = True
+                                    yield f"data: {json.dumps({'thinking_start': True})}\n\n"
+                                yield f"data: {json.dumps({'thinking': thinking})}\n\n"
+
+                            # Handle content tokens
                             if content:
+                                if is_thinking:
+                                    is_thinking = False
+                                    yield f"data: {json.dumps({'thinking_end': True})}\n\n"
                                 full_response += content
                                 yield f"data: {json.dumps({'content': content})}\n\n"
                         except json.JSONDecodeError:
