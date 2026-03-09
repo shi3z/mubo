@@ -1,7 +1,7 @@
 """
-Mubo Agent — 自己書き換え可能なエージェンティックAI
-プラグインシステムを備え、会話を通じてツールを自動的に増やせる。
-バージョン管理はgitで行い、いつでも任意の状態に戻れる。
+Mubo Agent — Self-rewriting agentic AI
+Features a plugin system to dynamically add tools through conversation.
+Version management via git, with rollback to any previous state.
 """
 
 import json
@@ -21,13 +21,35 @@ app = FastAPI()
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 MODEL = os.environ.get("MUBO_MODEL", "gpt-oss:20b-long")
 APP_FILE = Path(__file__).resolve()
-REPO_DIR = APP_FILE.parent.parent  # gitリポジトリのルート
+REPO_DIR = APP_FILE.parent.parent  # git repository root
 PLUGINS_DIR = APP_FILE.parent / "plugins"
 CONFIG_FILE = APP_FILE.parent / "config.json"
 
 PLUGINS_DIR.mkdir(exist_ok=True)
 
-# --- 設定読み込み ---
+# --- Web Search ---
+def _web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo and return results."""
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "No results found."
+        output = []
+        for r in results:
+            title = r.get("title", "")
+            href = r.get("href", "")
+            body = r.get("body", "")
+            output.append(f"**{title}**\n{href}\n{body}")
+        return "\n\n".join(output)
+    except ImportError:
+        return "Error: duckduckgo-search package not installed. Run: uv add duckduckgo-search"
+    except Exception as e:
+        return f"Search error: {e}"
+
+
+# --- Config ---
 DEFAULT_STRINGS = {
     "plugins": "Plugins",
     "history": "History",
@@ -101,9 +123,9 @@ CONFIG = _load_config()
 S = CONFIG["strings"]  # shorthand for strings
 
 
-# --- Git操作 ---
+# --- Git Operations ---
 def _git(*args, check=True) -> str:
-    """gitコマンドを実行して出力を返す"""
+    """Run a git command and return its output."""
     try:
         result = subprocess.run(
             ["git", "-C", str(REPO_DIR)] + list(args),
@@ -117,13 +139,13 @@ def _git(*args, check=True) -> str:
 
 
 def _git_commit(message: str):
-    """変更をステージしてコミット"""
+    """Stage changes and commit."""
     _git("add", "-A", check=False)
     _git("commit", "-m", message, "--allow-empty", check=False)
 
 
 def _git_log(max_count: int = 50) -> list[dict]:
-    """コミット履歴を取得"""
+    """Get commit history."""
     output = _git("log", f"--max-count={max_count}",
                    "--format=%H\t%s\t%ai", "--", "agent/app.py")
     if not output:
@@ -142,7 +164,7 @@ def _git_log(max_count: int = 50) -> list[dict]:
 
 
 def _git_get_initial_tag() -> str:
-    """マシン固有の初期タグを探す"""
+    """Find the machine-specific initial tag."""
     output = _git("tag", "-l", "mubo-initial-*")
     if output:
         return output.splitlines()[0].strip()
@@ -150,10 +172,9 @@ def _git_get_initial_tag() -> str:
 
 
 def _git_revert_to_commit(commit_hash: str) -> str:
-    """指定コミットのapp.pyに戻す"""
-    # まず現在の状態をコミット
+    """Revert app.py to the specified commit."""
     _git_commit(f"mubo: auto-save before revert to {commit_hash[:8]}")
-    # そのコミット時点の agent/app.py を取り出す
+    # Retrieve agent/app.py from that commit
     result = _git("show", f"{commit_hash}:agent/app.py", check=False)
     if not result:
         return f"{S['error_prefix']}: cannot retrieve app.py from {commit_hash[:8]}"
@@ -170,21 +191,20 @@ def _git_revert_to_previous() -> str:
 
 
 def _git_revert_to_initial() -> str:
-    """初期状態に戻す"""
+    """Revert to the initial state."""
     tag = _git_get_initial_tag()
     if tag:
-        # タグのコミットハッシュを取得
         commit = _git("rev-list", "-1", tag)
         if commit:
             return _git_revert_to_commit(commit)
-    # タグがなければ最初のコミットに戻す
+    # If no tag found, revert to the first commit
     first = _git("rev-list", "--max-parents=0", "HEAD")
     if first:
         return _git_revert_to_commit(first.splitlines()[0])
     return S["initial_not_found"]
 
 
-# --- プラグインシステム ---
+# --- Plugin System ---
 def _load_plugins() -> dict:
     plugins = {}
     for f in sorted(PLUGINS_DIR.glob("*.json")):
@@ -235,67 +255,76 @@ def _run_plugin(name: str, args: dict) -> str:
         return f"{S['error_prefix']}: plugin execution failed: {e}\n{traceback.format_exc()}"
 
 
-# --- システムプロンプト ---
+# --- System Prompt ---
 def _build_system_prompt() -> str:
     plugins = _load_plugins()
     enabled = {k: v for k, v in plugins.items() if v.get("enabled", True)}
 
     plugin_list = ""
     if enabled:
-        plugin_list = "\n### 利用可能なプラグイン\n"
+        plugin_list = "\n### Available Plugins\n"
         for name, p in enabled.items():
-            plugin_list += f"- **{name}**: {p.get('description', '説明なし')}\n"
+            plugin_list += f"- **{name}**: {p.get('description', 'No description')}\n"
         plugin_list += (
-            "\nプラグインを使うには:\n"
+            "\nTo use a plugin:\n"
             "```tool_call\n"
-            '{"tool": "use_plugin", "plugin": "プラグイン名", "args": {"key": "value"}}\n'
+            '{"tool": "use_plugin", "plugin": "plugin_name", "args": {"key": "value"}}\n'
             "```\n"
         )
 
     return (
-        f'あなたは「{CONFIG["agent_name"]}」({CONFIG["agent_name_en"]})、自己進化するAIアシスタントです。\n'
-        f'性格: {CONFIG.get("personality", "知的で親切なアシスタント")}\n'
-        "ユーザーとの会話に応答し、自分自身の機能を改善できます。\n"
+        f'You are "{CONFIG["agent_name"]}" ({CONFIG["agent_name_en"]}), a self-evolving AI assistant.\n'
+        f'Personality: {CONFIG.get("personality", "An intelligent and helpful assistant")}\n'
+        "You respond to user conversations and can improve your own capabilities.\n"
         "\n"
-        "## 重要なルール\n"
-        "**ツールを使用する際は、必ず事前にどのツールを使うか宣言してください。**\n"
-        "例: 「rewrite_self ツールを使ってコードを書き換えます」\n"
-        "例: 「create_plugin ツールで新しいプラグインを作成します」\n"
-        "例: 「use_plugin ツールで calculator プラグインを実行します」\n"
-        "宣言なしにツールを使わないでください。\n"
+        "## Important Rules\n"
+        "**When using a tool, you MUST declare which tool you will use before calling it.**\n"
+        "Example: \"I will use the web_search tool to look this up.\"\n"
+        "Example: \"I will use the rewrite_self tool to modify the code.\"\n"
+        "Example: \"I will use the create_plugin tool to add a new plugin.\"\n"
+        "Do NOT use tools without declaring them first.\n"
         "\n"
-        "## 組み込みツール\n"
-        "ツールを使う場合は、応答の中に以下のJSON形式を含めてください:\n"
+        "**When the user asks about current events, news, real-time information, or anything you are unsure about, "
+        "you MUST use the web_search tool. Do NOT make up information.**\n"
         "\n"
-        "### rewrite_self — 自分自身のソースコードを書き換え\n"
+        "## Built-in Tools\n"
+        "To use a tool, include the following JSON format in your response:\n"
+        "\n"
+        "### web_search — Search the web for current information\n"
+        "Use this tool whenever you need up-to-date information, news, facts, etc.\n"
         "```tool_call\n"
-        '{"tool": "rewrite_self", "new_code": "...新しいapp.pyの全内容..."}\n'
+        '{"tool": "web_search", "query": "search query here", "max_results": 5}\n'
         "```\n"
         "\n"
-        "### create_plugin — 新しいプラグインを作成\n"
-        "会話の中でユーザーが新しい機能を求めた場合、プラグインとして追加できます。\n"
+        "### rewrite_self — Rewrite your own source code\n"
         "```tool_call\n"
-        '{"tool": "create_plugin", "name": "英数字の名前", "description": "説明", '
+        '{"tool": "rewrite_self", "new_code": "...full new app.py content..."}\n'
+        "```\n"
+        "\n"
+        "### create_plugin — Create a new plugin\n"
+        "When the user requests new functionality, add it as a plugin.\n"
+        "```tool_call\n"
+        '{"tool": "create_plugin", "name": "alphanumeric_name", "description": "description", '
         '"code": "def run(args):\\n    return str(result)"}\n'
         "```\n"
-        "- code には必ず `def run(args):` 関数を定義してください\n"
-        "- args は辞書型で、プラグイン呼び出し時に渡されます\n"
-        "- run() の戻り値が結果として表示されます\n"
+        "- code must define a `def run(args):` function\n"
+        "- args is a dict passed when the plugin is called\n"
+        "- The return value of run() is displayed as the result\n"
         "\n"
-        "### use_plugin — プラグインを実行\n"
+        "### use_plugin — Execute a plugin\n"
         "```tool_call\n"
-        '{"tool": "use_plugin", "plugin": "プラグイン名", "args": {"key": "value"}}\n'
+        '{"tool": "use_plugin", "plugin": "plugin_name", "args": {"key": "value"}}\n'
         "```\n"
         + plugin_list
         + "\n"
-        "## 注意事項\n"
-        "- rewrite_self は既存の機能を壊さないよう注意してください\n"
-        "- ユーザーが明示的に依頼した場合のみツールを使ってください\n"
-        "- すべての変更はgitで管理されており、いつでも元に戻せます\n"
+        "## Notes\n"
+        "- Be careful not to break existing functionality when using rewrite_self\n"
+        "- Only use tools when the user explicitly requests it, or when you need real-time information\n"
+        "- All changes are managed with git and can be reverted at any time\n"
     )
 
 
-# --- HTML生成 ---
+# --- HTML Generation ---
 def _build_html():
     c = CONFIG["colors"]
     s = CONFIG["strings"]
@@ -931,7 +960,7 @@ async def revert_previous():
 @app.post("/api/revert/{commit_hash}")
 async def revert_to(commit_hash: str):
     if len(commit_hash) < 7:
-        return JSONResponse({"message": "無効なコミットハッシュ"}, status_code=400)
+        return JSONResponse({"message": "Invalid commit hash"}, status_code=400)
     msg = _git_revert_to_commit(commit_hash)
     _restart_server()
     return {"message": msg}
@@ -965,27 +994,35 @@ def _process_tool_calls(full_response: str):
         try:
             tc = json.loads(tc_json)
         except json.JSONDecodeError as e:
-            results.append({"error": f"JSONパースエラー: {e}"})
+            results.append({"error": f"JSON parse error: {e}"})
             continue
 
         tool = tc.get("tool", "")
-        if tool == "rewrite_self":
+        if tool == "web_search":
+            query = tc.get("query", "")
+            max_results = tc.get("max_results", 5)
+            if not query:
+                results.append({"error": "web_search: query is required"})
+            else:
+                search_result = _web_search(query, max_results=max_results)
+                results.append({"call": f"web_search: {query}", "result": search_result})
+
+        elif tool == "rewrite_self":
             new_code = tc.get("new_code", "")
             if new_code:
-                # 書き換え前にコミット
                 _git_commit("mubo: auto-save before rewrite_self")
                 APP_FILE.write_text(new_code, encoding="utf-8")
                 _git_commit("mubo: rewrite_self by agent")
                 results.append({"call": "rewrite_self", "result": S["code_rewritten"], "restart": True})
             else:
-                results.append({"error": "rewrite_self: new_code が空です"})
+                results.append({"error": "rewrite_self: new_code is empty"})
 
         elif tool == "create_plugin":
             pname = tc.get("name", "")
             pdesc = tc.get("description", "")
             pcode = tc.get("code", "")
             if not pname or not pcode:
-                results.append({"error": "create_plugin: name と code は必須です"})
+                results.append({"error": "create_plugin: name and code are required"})
             else:
                 plugin = {"name": pname, "description": pdesc, "code": pcode, "enabled": True}
                 _save_plugin(plugin)
@@ -995,13 +1032,13 @@ def _process_tool_calls(full_response: str):
             pname = tc.get("plugin", "")
             pargs = tc.get("args", {})
             if not pname:
-                results.append({"error": "use_plugin: plugin 名が必要です"})
+                results.append({"error": "use_plugin: plugin name is required"})
             else:
                 result = _run_plugin(pname, pargs)
                 results.append({"call": f"use_plugin: {pname}", "result": result})
 
         else:
-            results.append({"error": f"不明なツール: {tool}"})
+            results.append({"error": f"Unknown tool: {tool}"})
 
     return results
 
@@ -1037,14 +1074,44 @@ async def chat_endpoint(request: Request):
             if "```tool_call" in full_response:
                 results = _process_tool_calls(full_response)
                 need_restart = False
+                search_results = []
                 for r in results:
                     if "call" in r:
                         yield f"data: {json.dumps({'tool_call': r['call']})}\n\n"
-                        yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
+                        # Collect web_search results for follow-up LLM call
+                        if r["call"].startswith("web_search:"):
+                            search_results.append(r["result"])
+                        else:
+                            yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
                         if r.get("restart"):
                             need_restart = True
                     if "error" in r:
                         yield f"data: {json.dumps({'tool_error': r['error']})}\n\n"
+
+                # If we got web search results, feed them back to the LLM
+                if search_results:
+                    search_context = "\n\n---\n\n".join(search_results)
+                    followup_messages = messages + [
+                        {"role": "assistant", "content": full_response},
+                        {"role": "user", "content": f"Here are the web search results. Based on these results, provide an accurate answer to the user's original question.\n\n{search_context}"},
+                    ]
+                    async with httpx.AsyncClient(timeout=300.0) as client2:
+                        async with client2.stream(
+                            "POST",
+                            f"{OLLAMA_BASE}/api/chat",
+                            json={"model": MODEL, "messages": followup_messages, "stream": True},
+                        ) as resp2:
+                            async for line2 in resp2.aiter_lines():
+                                if not line2:
+                                    continue
+                                try:
+                                    data2 = json.loads(line2)
+                                    content2 = data2.get("message", {}).get("content", "")
+                                    if content2:
+                                        yield f"data: {json.dumps({'content': content2})}\n\n"
+                                except json.JSONDecodeError:
+                                    continue
+
                 if need_restart:
                     _restart_server()
 
@@ -1063,5 +1130,5 @@ async def chat_endpoint(request: Request):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("MUBO_PORT", "8392"))
-    print(f"\n  無貌 Mubo Agent starting on http://localhost:{port}\n")
+    print(f"\n  Mubo Agent starting on http://localhost:{port}\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
