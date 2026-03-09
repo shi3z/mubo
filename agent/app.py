@@ -488,6 +488,44 @@ body {{
     padding: 8px 14px;
     border-radius: 8px;
     font-family: monospace;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}}
+.message.tool-use .tool-icon {{
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid {c['accent']};
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: tool-spin 0.8s linear infinite;
+    flex-shrink: 0;
+}}
+.message.tool-use.done .tool-icon {{
+    animation: none;
+    border: none;
+    width: auto;
+    height: auto;
+}}
+.message.tool-use.done .tool-icon::after {{
+    content: "✓";
+}}
+.message.tool-result {{
+    align-self: flex-start;
+    background: {c['bg_secondary']};
+    border: 1px solid {c['accent']}20;
+    font-size: 0.8em;
+    color: {c['text_secondary']};
+    padding: 10px 14px;
+    border-radius: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}}
+@keyframes tool-spin {{
+    to {{ transform: rotate(360deg); }}
 }}
 #input-area {{
     padding: 16px 20px;
@@ -736,7 +774,7 @@ async function send() {{
     addMessage("user", text);
     messages.push({{role: "user", content: text}});
 
-    const assistantDiv = addMessage("assistant", "");
+    let assistantDiv = addMessage("assistant", "");
     let fullText = "";
 
     try {{
@@ -758,17 +796,41 @@ async function send() {{
                 if (data === "[DONE]") continue;
                 try {{
                     const j = JSON.parse(data);
+                    if (j.new_assistant) {{
+                        // Start a new assistant message for follow-up response
+                        assistantDiv = addMessage("assistant", "");
+                        fullText = "";
+                    }}
                     if (j.content) {{
                         fullText += j.content;
                         scheduleRender(assistantDiv, fullText);
                     }}
                     if (j.tool_call) {{
-                        addMessage("tool-use", j.tool_call);
+                        const toolDiv = document.createElement("div");
+                        toolDiv.className = "message tool-use";
+                        toolDiv.innerHTML = '<span class="tool-icon"></span>' + j.tool_call;
+                        toolDiv.id = "tool-active";
+                        chat.appendChild(toolDiv);
+                        chat.scrollTop = chat.scrollHeight;
                     }}
                     if (j.tool_result) {{
-                        addMessage("system", j.tool_result);
+                        const active = document.getElementById("tool-active");
+                        if (active) {{
+                            active.classList.add("done");
+                            active.removeAttribute("id");
+                        }}
+                        const resultDiv = document.createElement("div");
+                        resultDiv.className = "message tool-result";
+                        resultDiv.textContent = j.tool_result;
+                        chat.appendChild(resultDiv);
+                        chat.scrollTop = chat.scrollHeight;
                     }}
                     if (j.tool_error) {{
+                        const active = document.getElementById("tool-active");
+                        if (active) {{
+                            active.classList.add("done");
+                            active.removeAttribute("id");
+                        }}
                         addMessage("system", "Error: " + j.tool_error);
                     }}
                 }} catch(e) {{}}
@@ -1078,11 +1140,9 @@ async def chat_endpoint(request: Request):
                 for r in results:
                     if "call" in r:
                         yield f"data: {json.dumps({'tool_call': r['call']})}\n\n"
-                        # Collect web_search results for follow-up LLM call
+                        yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
                         if r["call"].startswith("web_search:"):
                             search_results.append(r["result"])
-                        else:
-                            yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
                         if r.get("restart"):
                             need_restart = True
                     if "error" in r:
@@ -1095,6 +1155,8 @@ async def chat_endpoint(request: Request):
                         {"role": "assistant", "content": full_response},
                         {"role": "user", "content": f"Here are the web search results. Based on these results, provide an accurate answer to the user's original question.\n\n{search_context}"},
                     ]
+                    # Signal frontend to start a new assistant message
+                    yield f"data: {json.dumps({'new_assistant': True})}\n\n"
                     async with httpx.AsyncClient(timeout=300.0) as client2:
                         async with client2.stream(
                             "POST",
