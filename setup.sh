@@ -626,7 +626,7 @@ If the locale is ja_JP, translate to Japanese. If en_US, keep English. If fr_FR,
     \"system_msg_border\": \"system message border (hex)\",
     \"system_msg_text\": \"system message text color (hex)\"
   },
-  \"personality\": \"One sentence describing this agent's personality (in locale language)\",
+  \"personality\": \"One sentence describing this agent personality (in locale language)\",
   \"strings\": {
     \"plugins\": \"Plugins (translated to locale)\",
     \"history\": \"History (translated)\",
@@ -658,11 +658,11 @@ If the locale is ja_JP, translate to Japanese. If en_US, keep English. If fr_FR,
     # Build the JSON request body via python to avoid shell escaping issues
     local request_body
     request_body=$(python3 -c "
-import json
-prompt = '''$prompt'''
+import json, sys
+prompt = sys.stdin.read()
 body = {'model': '${BASE_MODEL}', 'prompt': prompt, 'stream': False, 'options': {'temperature': 0.8}}
 print(json.dumps(body))
-" 2>/dev/null)
+" <<< "$prompt" 2>/dev/null)
 
     if [[ -z "$request_body" ]]; then
         warn "Failed to build request. Using default configuration"
@@ -684,21 +684,22 @@ print(json.dumps(body))
 
     # Extract JSON from Ollama's response field
     local llm_output
-    llm_output=$(echo "$response" | python3 -c "
+    llm_output=$(python3 -c "
 import sys, json
 try:
-    data = json.load(sys.stdin)
+    raw = sys.stdin.buffer.read()
+    data = json.loads(raw, strict=False)
     text = data.get('response', '')
     start = text.find('{')
     end = text.rfind('}') + 1
     if start >= 0 and end > start:
-        config = json.loads(text[start:end])
+        config = json.loads(text[start:end], strict=False)
         print(json.dumps(config, ensure_ascii=False, indent=2))
     else:
         sys.exit(1)
 except:
     sys.exit(1)
-" 2>/dev/null)
+" 2>/dev/null <<< "$response")
 
     if [[ $? -eq 0 && -n "$llm_output" ]]; then
         echo "$llm_output" > "$config_file"
