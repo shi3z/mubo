@@ -49,6 +49,64 @@ def _web_search(query: str, max_results: int = 5) -> str:
         return f"Search error: {e}"
 
 
+# --- File Operations ---
+def _file_read(path: str) -> str:
+    """Read a file and return its contents."""
+    try:
+        p = Path(path)
+        if not p.is_absolute():
+            p = APP_FILE.parent / p
+        if not p.exists():
+            return f"Error: file not found: {p}"
+        if not p.is_file():
+            return f"Error: not a file: {p}"
+        content = p.read_text(encoding="utf-8", errors="replace")
+        if len(content) > 10000:
+            content = content[:10000] + "\n... (truncated, 10000 chars shown)"
+        return content
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _file_write(path: str, content: str) -> str:
+    """Write content to a file."""
+    try:
+        p = Path(path)
+        if not p.is_absolute():
+            p = APP_FILE.parent / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return f"Written {len(content)} chars to {p}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _list_files(path: str = ".", pattern: str = "*") -> str:
+    """List files in a directory."""
+    try:
+        p = Path(path)
+        if not p.is_absolute():
+            p = APP_FILE.parent / p
+        if not p.exists():
+            return f"Error: directory not found: {p}"
+        if not p.is_dir():
+            return f"Error: not a directory: {p}"
+        entries = sorted(p.glob(pattern))
+        if not entries:
+            return "(no files matching)"
+        lines = []
+        for e in entries[:100]:
+            prefix = "d " if e.is_dir() else "f "
+            size = e.stat().st_size if e.is_file() else 0
+            lines.append(f"{prefix}{e.relative_to(p)}  ({size} bytes)" if e.is_file() else f"{prefix}{e.relative_to(p)}/")
+        result = "\n".join(lines)
+        if len(entries) > 100:
+            result += f"\n... ({len(entries) - 100} more entries)"
+        return result
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # --- Python Runner ---
 def _python_run(code: str, timeout: int = 30) -> str:
     """Execute Python code in a subprocess and return stdout/stderr."""
@@ -323,13 +381,26 @@ def _build_system_prompt() -> str:
         "```\n"
         "\n"
         "### python_run — Execute Python code\n"
-        "Run Python code and return the output. Use this for calculations, data processing, file operations, etc.\n"
+        "Run Python code and return the output. Use this for calculations, data processing, etc.\n"
         "```tool_call\n"
         '{"tool": "python_run", "code": "print(2 + 2)", "timeout": 30}\n'
         "```\n"
-        "- The code runs in a subprocess with python3\n"
-        "- Output (stdout + stderr) is returned\n"
-        "- Default timeout is 30 seconds\n"
+        "\n"
+        "### file_read — Read a file\n"
+        "```tool_call\n"
+        '{"tool": "file_read", "path": "relative/or/absolute/path.txt"}\n'
+        "```\n"
+        "- Relative paths are resolved from the agent directory\n"
+        "\n"
+        "### file_write — Write to a file\n"
+        "```tool_call\n"
+        '{"tool": "file_write", "path": "path.txt", "content": "file contents here"}\n'
+        "```\n"
+        "\n"
+        "### list_files — List files in a directory\n"
+        "```tool_call\n"
+        '{"tool": "list_files", "path": ".", "pattern": "*.py"}\n'
+        "```\n"
         "\n"
         "### rewrite_self — Rewrite your own source code\n"
         "```tool_call\n"
@@ -1111,7 +1182,30 @@ def _process_tool_calls(full_response: str):
                 results.append({"error": "python_run: code is required"})
             else:
                 run_result = _python_run(code, timeout=timeout)
-                results.append({"call": f"python_run", "result": run_result})
+                results.append({"call": "python_run", "result": run_result})
+
+        elif tool == "file_read":
+            fpath = tc.get("path", "")
+            if not fpath:
+                results.append({"error": "file_read: path is required"})
+            else:
+                content = _file_read(fpath)
+                results.append({"call": f"file_read: {fpath}", "result": content})
+
+        elif tool == "file_write":
+            fpath = tc.get("path", "")
+            content = tc.get("content", "")
+            if not fpath:
+                results.append({"error": "file_write: path is required"})
+            else:
+                write_result = _file_write(fpath, content)
+                results.append({"call": f"file_write: {fpath}", "result": write_result})
+
+        elif tool == "list_files":
+            fpath = tc.get("path", ".")
+            pattern = tc.get("pattern", "*")
+            list_result = _list_files(fpath, pattern)
+            results.append({"call": f"list_files: {fpath}", "result": list_result})
 
         elif tool == "rewrite_self":
             new_code = tc.get("new_code", "")
@@ -1185,9 +1279,10 @@ async def chat_endpoint(request: Request):
                     if "call" in r:
                         yield f"data: {json.dumps({'tool_call': r['call']})}\n\n"
                         yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
-                        # web_search and python_run results need LLM follow-up
+                        # Tools whose results need LLM follow-up
                         call_name = r["call"]
-                        if call_name.startswith("web_search:") or call_name == "python_run":
+                        followup_tools = ("web_search:", "python_run", "file_read:", "list_files:")
+                        if any(call_name.startswith(t) or call_name == t for t in followup_tools):
                             tool_outputs.append({"tool": call_name, "output": r["result"]})
                         if r.get("restart"):
                             need_restart = True
