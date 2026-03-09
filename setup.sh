@@ -600,31 +600,59 @@ generate_agent_identity() {
 - ターミナル: ${term_program}
 - OS外観モード: ${os_appearance}
 
-以下のJSON形式のみで回答してください。他のテキストは一切含めないでください:
+Respond ONLY with the following JSON. No other text.
+All \"strings\" values MUST be translated to match the locale (${locale_info}).
+If the locale is ja_JP, translate to Japanese. If en_US, keep English. If fr_FR, translate to French. Etc.
 {
-  \"agent_name\": \"マシンの雰囲気に合った短い名前(2-4文字の日本語 or 英語)\",
-  \"agent_name_en\": \"英語での名前\",
-  \"theme\": \"dark または light (OSの外観モードやマシンの雰囲気から判断)\",
+  \"agent_name\": \"A short name fitting this machine (2-4 chars, native language or English)\",
+  \"agent_name_en\": \"English name\",
+  \"theme\": \"dark or light (based on OS appearance and machine vibe)\",
   \"colors\": {
-    \"bg\": \"背景色(hex)\",
-    \"bg_secondary\": \"セカンダリ背景色(hex)\",
-    \"header_bg\": \"ヘッダー背景(CSS gradient可)\",
-    \"text\": \"テキスト色(hex)\",
-    \"text_secondary\": \"セカンダリテキスト色(hex)\",
-    \"accent\": \"アクセント色(hex)\",
-    \"accent_secondary\": \"アクセントのセカンダリ色(hex)\",
-    \"user_msg_bg\": \"ユーザーメッセージ背景(hex)\",
-    \"user_msg_border\": \"ユーザーメッセージ枠線(hex)\",
-    \"assistant_msg_bg\": \"アシスタントメッセージ背景(hex)\",
-    \"assistant_msg_border\": \"アシスタントメッセージ枠線(hex)\",
-    \"input_bg\": \"入力欄背景(hex)\",
-    \"input_border\": \"入力欄枠線(hex)\",
-    \"button_bg\": \"送信ボタン背景(CSS gradient可)\",
-    \"system_msg_bg\": \"システムメッセージ背景(hex)\",
-    \"system_msg_border\": \"システムメッセージ枠線(hex)\",
-    \"system_msg_text\": \"システムメッセージ文字色(hex)\"
+    \"bg\": \"background color (hex)\",
+    \"bg_secondary\": \"secondary background (hex)\",
+    \"header_bg\": \"header background (CSS gradient OK)\",
+    \"text\": \"text color (hex)\",
+    \"text_secondary\": \"secondary text color (hex)\",
+    \"accent\": \"accent color (hex)\",
+    \"accent_secondary\": \"secondary accent (hex)\",
+    \"user_msg_bg\": \"user message background (hex)\",
+    \"user_msg_border\": \"user message border (hex)\",
+    \"assistant_msg_bg\": \"assistant message background (hex)\",
+    \"assistant_msg_border\": \"assistant message border (hex)\",
+    \"input_bg\": \"input background (hex)\",
+    \"input_border\": \"input border (hex)\",
+    \"button_bg\": \"send button background (CSS gradient OK)\",
+    \"system_msg_bg\": \"system message background (hex)\",
+    \"system_msg_border\": \"system message border (hex)\",
+    \"system_msg_text\": \"system message text color (hex)\"
   },
-  \"personality\": \"このエージェントの性格を一文で(日本語)\"
+  \"personality\": \"One sentence describing this agent's personality (in locale language)\",
+  \"strings\": {
+    \"plugins\": \"Plugins (translated to locale)\",
+    \"history\": \"History (translated)\",
+    \"undo\": \"Undo (translated)\",
+    \"reset\": \"Reset (translated)\",
+    \"send\": \"Send (translated)\",
+    \"close\": \"Close (translated)\",
+    \"placeholder\": \"Type a message... (translated)\",
+    \"history_title\": \"Git History (agent/app.py) (translated)\",
+    \"plugins_title\": \"Plugins (translated)\",
+    \"no_history\": \"No history available (translated)\",
+    \"no_plugins\": \"No plugins yet. Ask in chat to create one. (translated)\",
+    \"confirm_reset\": \"Reset to initial state? (translated)\",
+    \"confirm_revert\": \"Revert to this version? (translated)\",
+    \"confirm_delete_plugin\": \"Delete plugin? (translated)\",
+    \"revert_btn\": \"Restore (translated)\",
+    \"delete_btn\": \"Delete (translated)\",
+    \"no_description\": \"No description (translated)\",
+    \"code_rewritten\": \"Code rewritten. Server restarting. (translated)\",
+    \"error_prefix\": \"Error (translated)\",
+    \"error_ollama\": \"Cannot connect to Ollama server. Run ollama serve. (translated)\",
+    \"restored_msg\": \"Restored. Server restarting. (translated)\",
+    \"no_previous\": \"No previous state (translated)\",
+    \"plugin_created\": \"Plugin created (translated)\",
+    \"initial_not_found\": \"Initial commit not found (translated)\"
+  }
 }"
 
     local response
@@ -675,7 +703,7 @@ except:
 _write_default_config() {
     cat > "$1" <<'DEFAULTCFG'
 {
-  "agent_name": "無貌",
+  "agent_name": "Mubo",
   "agent_name_en": "Mubo",
   "theme": "dark",
   "colors": {
@@ -697,7 +725,33 @@ _write_default_config() {
     "system_msg_border": "#ff6b3530",
     "system_msg_text": "#f7c948"
   },
-  "personality": "炎のように情熱的で、知識の光を灯す守護者"
+  "personality": "A passionate guardian who ignites the light of knowledge",
+  "strings": {
+    "plugins": "Plugins",
+    "history": "History",
+    "undo": "Undo",
+    "reset": "Reset",
+    "send": "Send",
+    "close": "Close",
+    "placeholder": "Type a message...",
+    "history_title": "Git History (agent/app.py)",
+    "plugins_title": "Plugins",
+    "no_history": "No history available",
+    "no_plugins": "No plugins yet. Ask in chat to create one.",
+    "confirm_reset": "Reset to initial state?",
+    "confirm_revert": "Revert to this version?",
+    "confirm_delete_plugin": "Delete plugin?",
+    "revert_btn": "Restore",
+    "delete_btn": "Delete",
+    "no_description": "No description",
+    "code_rewritten": "Code rewritten. Server restarting.",
+    "error_prefix": "Error",
+    "error_ollama": "Cannot connect to Ollama server. Run: ollama serve",
+    "restored_msg": "Restored. Server restarting.",
+    "no_previous": "No previous state",
+    "plugin_created": "Plugin created",
+    "initial_not_found": "Initial commit not found"
+  }
 }
 DEFAULTCFG
 }
@@ -940,14 +994,16 @@ check_for_updates() {
 }
 
 ensure_repo() {
-    # curl | bash で実行された場合、リポジトリをcloneして再実行
+    # curl | bash で実行された場合、リポジトリをカレントディレクトリにcloneして再実行
     if [[ ! -f "$(dirname "$0")/agent/app.py" ]] && [[ ! -f "./agent/app.py" ]]; then
         install_git
-        info "リポジトリが見つかりません。cloneします..."
-        local tmpdir
-        tmpdir=$(mktemp -d)
-        git clone https://github.com/shi3z/mubo.git "$tmpdir/mubo"
-        cd "$tmpdir/mubo"
+        info "Cloning mubo into current directory..."
+        if [[ -d "./mubo" ]]; then
+            info "mubo/ already exists, using it"
+        else
+            git clone https://github.com/shi3z/mubo.git ./mubo
+        fi
+        cd ./mubo
         exec bash ./setup.sh "$@"
     fi
 }

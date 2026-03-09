@@ -28,8 +28,35 @@ CONFIG_FILE = APP_FILE.parent / "config.json"
 PLUGINS_DIR.mkdir(exist_ok=True)
 
 # --- 設定読み込み ---
+DEFAULT_STRINGS = {
+    "plugins": "Plugins",
+    "history": "History",
+    "undo": "Undo",
+    "reset": "Reset",
+    "send": "Send",
+    "close": "Close",
+    "placeholder": "Type a message...",
+    "history_title": "Git History (agent/app.py)",
+    "plugins_title": "Plugins",
+    "no_history": "No history available",
+    "no_plugins": "No plugins yet. Ask in chat to create one.",
+    "confirm_reset": "Reset to initial state?",
+    "confirm_revert": "Revert to this version?",
+    "confirm_delete_plugin": "Delete plugin?",
+    "revert_btn": "Restore",
+    "delete_btn": "Delete",
+    "no_description": "No description",
+    "code_rewritten": "Code rewritten. Server restarting.",
+    "error_prefix": "Error",
+    "error_ollama": "Cannot connect to Ollama server. Run: ollama serve",
+    "restored_msg": "Restored. Server restarting.",
+    "no_previous": "No previous state",
+    "plugin_created": "Plugin created",
+    "initial_not_found": "Initial commit not found",
+}
+
 DEFAULT_CONFIG = {
-    "agent_name": "無貌",
+    "agent_name": "Mubo",
     "agent_name_en": "Mubo",
     "theme": "dark",
     "colors": {
@@ -51,7 +78,8 @@ DEFAULT_CONFIG = {
         "system_msg_border": "#ff6b3530",
         "system_msg_text": "#f7c948",
     },
-    "personality": "炎のように情熱的で、知識の光を灯す守護者",
+    "personality": "A passionate guardian who ignites the light of knowledge",
+    "strings": DEFAULT_STRINGS,
 }
 
 
@@ -62,6 +90,7 @@ def _load_config():
                 cfg = json.load(f)
             merged = {**DEFAULT_CONFIG, **cfg}
             merged["colors"] = {**DEFAULT_CONFIG["colors"], **cfg.get("colors", {})}
+            merged["strings"] = {**DEFAULT_STRINGS, **cfg.get("strings", {})}
             return merged
         except (json.JSONDecodeError, KeyError):
             pass
@@ -69,6 +98,7 @@ def _load_config():
 
 
 CONFIG = _load_config()
+S = CONFIG["strings"]  # shorthand for strings
 
 
 # --- Git操作 ---
@@ -126,17 +156,16 @@ def _git_revert_to_commit(commit_hash: str) -> str:
     # そのコミット時点の agent/app.py を取り出す
     result = _git("show", f"{commit_hash}:agent/app.py", check=False)
     if not result:
-        return f"コミット {commit_hash[:8]} からapp.pyを取得できません"
+        return f"{S['error_prefix']}: cannot retrieve app.py from {commit_hash[:8]}"
     APP_FILE.write_text(result, encoding="utf-8")
     _git_commit(f"mubo: revert app.py to {commit_hash[:8]}")
-    return f"{commit_hash[:8]} に復元しました。サーバーを再起動します。"
+    return f"{commit_hash[:8]} — {S['restored_msg']}"
 
 
 def _git_revert_to_previous() -> str:
-    """1つ前のコミットに戻す"""
     log = _git_log(max_count=2)
     if len(log) < 2:
-        return "前の状態がありません"
+        return S["no_previous"]
     return _git_revert_to_commit(log[1]["hash"])
 
 
@@ -152,7 +181,7 @@ def _git_revert_to_initial() -> str:
     first = _git("rev-list", "--max-parents=0", "HEAD")
     if first:
         return _git_revert_to_commit(first.splitlines()[0])
-    return "初期コミットが見つかりません"
+    return S["initial_not_found"]
 
 
 # --- プラグインシステム ---
@@ -188,22 +217,22 @@ def _delete_plugin(name: str) -> bool:
 def _run_plugin(name: str, args: dict) -> str:
     plugins = _load_plugins()
     if name not in plugins:
-        return f"エラー: プラグイン '{name}' が見つかりません"
+        return f"{S['error_prefix']}: plugin '{name}' not found"
     plugin = plugins[name]
     if not plugin.get("enabled", True):
-        return f"エラー: プラグイン '{name}' は無効化されています"
+        return f"{S['error_prefix']}: plugin '{name}' is disabled"
     code = plugin.get("code", "")
     if not code:
-        return f"エラー: プラグイン '{name}' にコードがありません"
+        return f"{S['error_prefix']}: plugin '{name}' has no code"
     try:
         local_ns = {}
         exec(code, {"__builtins__": __builtins__}, local_ns)
         if "run" not in local_ns:
-            return "エラー: プラグインに run(args) 関数が定義されていません"
+            return f"{S['error_prefix']}: plugin missing run(args) function"
         result = local_ns["run"](args)
         return str(result)
     except Exception as e:
-        return f"プラグイン実行エラー: {e}\n{traceback.format_exc()}"
+        return f"{S['error_prefix']}: plugin execution failed: {e}\n{traceback.format_exc()}"
 
 
 # --- システムプロンプト ---
@@ -269,11 +298,12 @@ def _build_system_prompt() -> str:
 # --- HTML生成 ---
 def _build_html():
     c = CONFIG["colors"]
+    s = CONFIG["strings"]
     name = CONFIG["agent_name"]
     name_en = CONFIG["agent_name_en"]
     return f"""\
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -571,39 +601,40 @@ body {{
 <div id="header">
     <h1>{name} {name_en} Agent</h1>
     <div class="header-buttons">
-        <button onclick="showPlugins()">Plugins</button>
-        <button onclick="showHistory()">履歴</button>
-        <button onclick="revertPrev()">前に戻す</button>
-        <button class="danger" onclick="revertInitial()">初期化</button>
+        <button onclick="showPlugins()">{s['plugins']}</button>
+        <button onclick="showHistory()">{s['history']}</button>
+        <button onclick="revertPrev()">{s['undo']}</button>
+        <button class="danger" onclick="revertInitial()">{s['reset']}</button>
     </div>
 </div>
 <div id="chat"></div>
 <div id="model-info">Model: <span id="model-name">loading...</span></div>
 <div id="input-area">
-    <textarea id="msg" placeholder="メッセージを入力..." rows="1"
+    <textarea id="msg" placeholder="{s['placeholder']}" rows="1"
         onkeydown="handleKeyDown(event)"></textarea>
-    <button id="send-btn" onclick="send()">送信</button>
+    <button id="send-btn" onclick="send()">{s['send']}</button>
 </div>
 
 <!-- History Modal -->
 <div class="modal-overlay" id="history-modal">
     <div class="modal">
-        <h2>Git 履歴 (agent/app.py)</h2>
+        <h2>{s['history_title']}</h2>
         <div class="list-area" id="history-list"></div>
-        <button class="close-btn" onclick="closeModal('history-modal')">閉じる</button>
+        <button class="close-btn" onclick="closeModal('history-modal')">{s['close']}</button>
     </div>
 </div>
 
 <!-- Plugins Modal -->
 <div class="modal-overlay" id="plugins-modal">
     <div class="modal">
-        <h2>Plugins</h2>
+        <h2>{s['plugins_title']}</h2>
         <div class="list-area" id="plugins-list"></div>
-        <button class="close-btn" onclick="closeModal('plugins-modal')">閉じる</button>
+        <button class="close-btn" onclick="closeModal('plugins-modal')">{s['close']}</button>
     </div>
 </div>
 
 <script>
+const S = {json.dumps(s, ensure_ascii=False)};
 const chat = document.getElementById("chat");
 const msgInput = document.getElementById("msg");
 const sendBtn = document.getElementById("send-btn");
@@ -739,7 +770,7 @@ async function showHistory() {{
     const list = document.getElementById("history-list");
     list.innerHTML = "";
     if (d.commits.length === 0) {{
-        list.innerHTML = '<div class="empty-msg">履歴がありません</div>';
+        list.innerHTML = '<div class="empty-msg">' + S.no_history + '</div>';
     }}
     for (const c of d.commits) {{
         const item = document.createElement("div");
@@ -750,7 +781,7 @@ async function showHistory() {{
                 <div class="item-desc">${{c.time}} <span class="item-hash">${{c.hash_short}}</span></div>
             </div>
             <div class="item-actions">
-                <button onclick="revertToCommit('${{c.hash}}')">復元</button>
+                <button onclick="revertToCommit('${{c.hash}}')">${{S.revert_btn}}</button>
             </div>`;
         list.appendChild(item);
     }}
@@ -758,7 +789,7 @@ async function showHistory() {{
 }}
 
 async function revertInitial() {{
-    if (!confirm("初期状態に戻しますか？")) return;
+    if (!confirm(S.confirm_reset)) return;
     const r = await fetch("/api/revert/initial", {{method:"POST"}});
     const d = await r.json();
     addMessage("system", d.message);
@@ -771,7 +802,7 @@ async function revertPrev() {{
 }}
 
 async function revertToCommit(hash) {{
-    if (!confirm(hash.slice(0,8) + " に復元しますか？")) return;
+    if (!confirm(S.confirm_revert + " (" + hash.slice(0,8) + ")")) return;
     const r = await fetch("/api/revert/" + hash, {{method:"POST"}});
     const d = await r.json();
     closeModal("history-modal");
@@ -785,7 +816,7 @@ async function showPlugins() {{
     const list = document.getElementById("plugins-list");
     list.innerHTML = "";
     if (d.plugins.length === 0) {{
-        list.innerHTML = '<div class="empty-msg">プラグインがありません。<br>チャットで「〜するプラグインを作って」と依頼してください。</div>';
+        list.innerHTML = '<div class="empty-msg">' + S.no_plugins + '</div>';
     }}
     for (const p of d.plugins) {{
         const item = document.createElement("div");
@@ -794,14 +825,14 @@ async function showPlugins() {{
         item.innerHTML = `
             <div class="item-info">
                 <div class="item-name">${{p.name}}</div>
-                <div class="item-desc">${{p.description || "説明なし"}}</div>
+                <div class="item-desc">${{p.description || S.no_description}}</div>
             </div>
             <div class="item-actions">
                 <label class="toggle">
                     <input type="checkbox" ${{checked}} onchange="togglePlugin('${{p.name}}', this.checked)">
                     <span class="slider"></span>
                 </label>
-                <button class="del" onclick="deletePlugin('${{p.name}}')">削除</button>
+                <button class="del" onclick="deletePlugin('${{p.name}}')">${{S.delete_btn}}</button>
             </div>`;
         list.appendChild(item);
     }}
@@ -817,7 +848,7 @@ async function togglePlugin(name, enabled) {{
 }}
 
 async function deletePlugin(name) {{
-    if (!confirm("プラグイン '" + name + "' を削除しますか？")) return;
+    if (!confirm(S.confirm_delete_plugin + " (" + name + ")")) return;
     await fetch("/api/plugins/" + encodeURIComponent(name), {{method: "DELETE"}});
     showPlugins();
 }}
@@ -945,7 +976,7 @@ def _process_tool_calls(full_response: str):
                 _git_commit("mubo: auto-save before rewrite_self")
                 APP_FILE.write_text(new_code, encoding="utf-8")
                 _git_commit("mubo: rewrite_self by agent")
-                results.append({"call": "rewrite_self", "result": "コード書き換え完了。サーバーを再起動します。", "restart": True})
+                results.append({"call": "rewrite_self", "result": S["code_rewritten"], "restart": True})
             else:
                 results.append({"error": "rewrite_self: new_code が空です"})
 
@@ -958,7 +989,7 @@ def _process_tool_calls(full_response: str):
             else:
                 plugin = {"name": pname, "description": pdesc, "code": pcode, "enabled": True}
                 _save_plugin(plugin)
-                results.append({"call": f"create_plugin: {pname}", "result": f"プラグイン '{pname}' を作成しました"})
+                results.append({"call": f"create_plugin: {pname}", "result": f"{S['plugin_created']}: {pname}"})
 
         elif tool == "use_plugin":
             pname = tc.get("plugin", "")
@@ -1019,10 +1050,11 @@ async def chat_endpoint(request: Request):
 
             yield "data: [DONE]\n\n"
         except httpx.ConnectError:
-            yield f"data: {json.dumps({'content': 'エラー: Ollamaサーバーに接続できません。ollama serve を実行してください。'})}\n\n"
+            yield f"data: {json.dumps({'content': S['error_ollama']})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'content': f'エラー: {str(e)}'})}\n\n"
+            err_prefix = S["error_prefix"]
+            yield f"data: {json.dumps({'content': f'{err_prefix}: {str(e)}'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
