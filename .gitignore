@@ -1,0 +1,5 @@
+agent/config.json
+agent/history/
+agent/.venv/
+__pycache__/
+*.pyc

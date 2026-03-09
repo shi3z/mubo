@@ -1,4 +1,4 @@
-# Suzaku（朱雀）
+# Mubo（無貌）
 
 ワンショットでローカルLLM環境を自動構築するブートストラッパー。
 
@@ -11,6 +11,7 @@
 - **コンテキスト長の最適化** — 搭載メモリに応じて最適なコンテキスト長を自動設定
   - 64GB以上: 128K / 32GB以上: 64K / 16GB以上: 32K / 16GB未満: 16K
 - **オプション機能の安全なインストール** — vLLM、MLX、Docker等はコア機能を壊さず導入
+- **自己書き換えAIエージェント** — Webフロントエンド付きのエージェントが自動起動、自身のコードを進化させる
 
 ## 対応プラットフォーム
 
@@ -24,33 +25,27 @@
 ## クイックスタート
 
 ```bash
-git clone https://github.com/shi3z/suzaku.git
-cd suzaku
+git clone https://github.com/shi3z/mubo.git
+cd mubo
 ./setup.sh
 ```
 
-セットアップ完了後:
+セットアップ完了後、ブラウザで http://localhost:8392 を開くとAIエージェントが利用可能。
+
+CLIでの利用:
 
 ```bash
 ollama run gpt-oss:20b-long
 ```
 
-API経由での利用:
-
-```bash
-curl http://localhost:11434/api/chat -d '{
-  "model": "gpt-oss:20b-long",
-  "messages": [{"role": "user", "content": "こんにちは"}]
-}'
-```
-
-## セットアップの5フェーズ
+## セットアップの6フェーズ
 
 1. **環境検出** — OS、CPUアーキテクチャ、RAM、GPU種別を検出
 2. **Ollamaインストール** — Ollamaの導入とサーバーのヘルスチェック
 3. **ベースモデルのダウンロード** — gpt-oss:20b を取得
 4. **派生モデルの作成** — メモリに応じた拡張コンテキスト長でモデルを作成
 5. **追加環境の構築（任意）** — vLLM、MLX、uv、Docker等
+6. **Mubo Agent デプロイ** — 自己書き換え可能なAIエージェントを起動
 
 ## 必要要件
 

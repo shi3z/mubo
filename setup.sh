@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# Suzaku — One-shot Local LLM Bootstrapper
+# Mubo (無貌) — One-shot Local LLM Bootstrapper
 # spec.md に基づく自動環境セットアップスクリプト
 # ============================================================
 
@@ -145,6 +145,65 @@ install_prerequisites() {
     fi
 }
 
+install_docker() {
+    if [[ "$OS" == "macos" ]]; then
+        if command -v brew &>/dev/null; then
+            info "Homebrew 経由で Docker をインストール中..."
+            brew install --cask docker
+            ok "Docker Desktop インストール完了"
+            info "Docker Desktop を起動中..."
+            open -a Docker 2>/dev/null || true
+            # 起動を待つ
+            local dw=0
+            while ! docker info &>/dev/null 2>&1; do
+                sleep 2
+                dw=$((dw + 2))
+                if [[ $dw -ge 60 ]]; then
+                    warn "Docker Desktop の起動に時間がかかっています"
+                    break
+                fi
+            done
+        else
+            err "Docker Desktop のインストールには Homebrew が必要です"
+            info "  Homebrew: https://brew.sh"
+            info "  または手動: https://docs.docker.com/desktop/install/mac-install/"
+            return 1
+        fi
+    elif [[ "$OS" == "linux" ]]; then
+        info "Docker Engine をインストール中..."
+        if command -v apt-get &>/dev/null; then
+            # Debian/Ubuntu
+            sudo apt-get update -y
+            sudo apt-get install -y ca-certificates curl gnupg
+            sudo install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg \
+                | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+            sudo chmod a+r /etc/apt/keyrings/docker.gpg
+            echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
+                $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        elif command -v dnf &>/dev/null; then
+            # Fedora/RHEL
+            sudo dnf -y install dnf-plugins-core
+            sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || true
+            sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        else
+            # フォールバック: 公式convenience script
+            info "公式インストールスクリプトで Docker をインストール中..."
+            curl -fsSL https://get.docker.com | sh
+        fi
+        # デーモン起動 & 現ユーザーをdockerグループに追加
+        sudo systemctl enable docker 2>/dev/null || true
+        sudo systemctl start docker 2>/dev/null || true
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+        ok "Docker Engine インストール完了"
+        info "dockerグループの反映には再ログインが必要な場合があります"
+    fi
+}
+
 install_ollama() {
     install_prerequisites
 
@@ -249,7 +308,7 @@ create_extended_model() {
     fi
 
     local modelfile
-    modelfile=$(mktemp /tmp/suzaku-modelfile.XXXXXX)
+    modelfile=$(mktemp /tmp/mubo-modelfile.XXXXXX)
 
     cat > "$modelfile" <<EOF
 FROM ${BASE_MODEL}
@@ -377,16 +436,42 @@ setup_mlx() {
 
 setup_docker_check() {
     if ! command -v docker &>/dev/null; then
-        info "Docker: 未インストール (必須ではありません)"
-        info "  インストール: https://docs.docker.com/get-docker/"
+        info "Docker が見つかりません。インストールします..."
+        install_docker
+    fi
+
+    if ! command -v docker &>/dev/null; then
+        warn "Docker のインストールに失敗しました (本線に影響なし)"
         return
     fi
 
+    # Docker デーモン起動確認
     if ! docker info &>/dev/null 2>&1; then
+        info "Docker デーモンを起動します..."
+        if [[ "$OS" == "macos" ]]; then
+            open -a Docker 2>/dev/null || true
+            # Docker Desktop の起動を最大60秒待つ
+            local dw=0
+            while ! docker info &>/dev/null 2>&1; do
+                sleep 2
+                dw=$((dw + 2))
+                if [[ $dw -ge 60 ]]; then
+                    warn "Docker デーモンの起動がタイムアウトしました"
+                    return
+                fi
+            done
+        elif [[ "$OS" == "linux" ]]; then
+            sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
+            sleep 2
+        fi
+    fi
+
+    if docker info &>/dev/null 2>&1; then
+        ok "Docker デーモンは稼働中"
+    else
         warn "Docker はインストール済みですがデーモンが停止中です"
         return
     fi
-    ok "Docker デーモンは稼働中"
 
     # --- NVIDIA Container Runtime / nvidia-docker テスト ---
     if [[ "$OS" != "linux" || "$GPU_TYPE" != "nvidia" ]]; then
@@ -455,6 +540,244 @@ test_nvidia_docker() {
 }
 
 # ============================================================
+# Phase 6: Mubo Agent (自己書き換えAI) デプロイ & 起動
+# ============================================================
+generate_agent_identity() {
+    local agent_dir="$1"
+    local config_file="${agent_dir}/config.json"
+
+    # 既に config.json があればスキップ
+    if [[ -f "$config_file" ]]; then
+        ok "エージェント設定は既に存在します"
+        return
+    fi
+
+    info "Ollama にエージェントの名前とカラースキームを考えさせています..."
+
+    # マシン情報を収集
+    local hostname
+    hostname="$(hostname 2>/dev/null || echo 'unknown')"
+    local username
+    username="$(whoami 2>/dev/null || echo 'user')"
+    local machine_model=""
+    if [[ "$OS" == "macos" ]]; then
+        machine_model="$(sysctl -n hw.model 2>/dev/null || echo '')"
+    elif [[ -f /sys/devices/virtual/dmi/id/product_name ]]; then
+        machine_model="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo '')"
+    fi
+    local shell_name
+    shell_name="$(basename "${SHELL:-bash}")"
+    local locale_info
+    locale_info="$(echo "${LANG:-${LC_ALL:-en_US.UTF-8}}")"
+    local current_hour
+    current_hour="$(date +%H)"
+    local term_program
+    term_program="${TERM_PROGRAM:-unknown}"
+    # macOS: ダークモード判定
+    local os_appearance="unknown"
+    if [[ "$OS" == "macos" ]]; then
+        if defaults read -g AppleInterfaceStyle &>/dev/null 2>&1; then
+            os_appearance="dark"
+        else
+            os_appearance="light"
+        fi
+    fi
+
+    local prompt
+    prompt="あなたはAIエージェントの命名とUIデザインの専門家です。
+以下のマシン情報から、このマシンに住むAIエージェントにふさわしい名前とカラースキームを考えてください。
+
+マシン情報:
+- ホスト名: ${hostname}
+- ユーザー名: ${username}
+- OS: ${OS} (${ARCH})
+- マシンモデル: ${machine_model:-不明}
+- RAM: ${RAM_GB}GB
+- GPU: ${GPU_TYPE}
+- シェル: ${shell_name}
+- ロケール: ${locale_info}
+- 現在時刻: ${current_hour}時
+- ターミナル: ${term_program}
+- OS外観モード: ${os_appearance}
+
+以下のJSON形式のみで回答してください。他のテキストは一切含めないでください:
+{
+  \"agent_name\": \"マシンの雰囲気に合った短い名前(2-4文字の日本語 or 英語)\",
+  \"agent_name_en\": \"英語での名前\",
+  \"theme\": \"dark または light (OSの外観モードやマシンの雰囲気から判断)\",
+  \"colors\": {
+    \"bg\": \"背景色(hex)\",
+    \"bg_secondary\": \"セカンダリ背景色(hex)\",
+    \"header_bg\": \"ヘッダー背景(CSS gradient可)\",
+    \"text\": \"テキスト色(hex)\",
+    \"text_secondary\": \"セカンダリテキスト色(hex)\",
+    \"accent\": \"アクセント色(hex)\",
+    \"accent_secondary\": \"アクセントのセカンダリ色(hex)\",
+    \"user_msg_bg\": \"ユーザーメッセージ背景(hex)\",
+    \"user_msg_border\": \"ユーザーメッセージ枠線(hex)\",
+    \"assistant_msg_bg\": \"アシスタントメッセージ背景(hex)\",
+    \"assistant_msg_border\": \"アシスタントメッセージ枠線(hex)\",
+    \"input_bg\": \"入力欄背景(hex)\",
+    \"input_border\": \"入力欄枠線(hex)\",
+    \"button_bg\": \"送信ボタン背景(CSS gradient可)\",
+    \"system_msg_bg\": \"システムメッセージ背景(hex)\",
+    \"system_msg_border\": \"システムメッセージ枠線(hex)\",
+    \"system_msg_text\": \"システムメッセージ文字色(hex)\"
+  },
+  \"personality\": \"このエージェントの性格を一文で(日本語)\"
+}"
+
+    local response
+    response=$(curl -s --max-time 60 "${OLLAMA_BASE:-http://localhost:11434}/api/generate" \
+        -d "$(printf '{"model":"%s","prompt":"%s","stream":false,"options":{"temperature":0.8}}' \
+            "${BASE_MODEL}" \
+            "$(echo "$prompt" | sed 's/"/\\"/g' | tr '\n' ' ')")" \
+        2>/dev/null)
+
+    if [[ -z "$response" ]]; then
+        warn "Ollama からの応答がありません。デフォルト設定を使用します"
+        _write_default_config "$config_file"
+        return
+    fi
+
+    # Ollama の response フィールドから JSON を抽出
+    local llm_output
+    llm_output=$(echo "$response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    text = data.get('response', '')
+    # JSON部分を抽出
+    start = text.find('{')
+    end = text.rfind('}') + 1
+    if start >= 0 and end > start:
+        # パース確認
+        config = json.loads(text[start:end])
+        print(json.dumps(config, ensure_ascii=False, indent=2))
+    else:
+        sys.exit(1)
+except:
+    sys.exit(1)
+" 2>/dev/null)
+
+    if [[ $? -eq 0 && -n "$llm_output" ]]; then
+        echo "$llm_output" > "$config_file"
+        local agent_name
+        agent_name=$(python3 -c "import json; d=json.load(open('${config_file}')); print(d.get('agent_name','Mubo'))" 2>/dev/null)
+        ok "エージェント名: ${agent_name}"
+        info "カラースキーム生成完了"
+    else
+        warn "LLM出力のパースに失敗しました。デフォルト設定を使用します"
+        _write_default_config "$config_file"
+    fi
+}
+
+_write_default_config() {
+    cat > "$1" <<'DEFAULTCFG'
+{
+  "agent_name": "無貌",
+  "agent_name_en": "Mubo",
+  "theme": "dark",
+  "colors": {
+    "bg": "#0a0a0f",
+    "bg_secondary": "#0d1117",
+    "header_bg": "linear-gradient(135deg, #1a0a2e, #0d1117)",
+    "text": "#e0e0e0",
+    "text_secondary": "#666666",
+    "accent": "#ff6b35",
+    "accent_secondary": "#f7c948",
+    "user_msg_bg": "#1a3a5c",
+    "user_msg_border": "#2a5a8c",
+    "assistant_msg_bg": "#1a1a2e",
+    "assistant_msg_border": "#2a2a4e",
+    "input_bg": "#1a1a2e",
+    "input_border": "#2a2a4e",
+    "button_bg": "linear-gradient(135deg, #ff6b35, #e55a2b)",
+    "system_msg_bg": "#2a1a0e",
+    "system_msg_border": "#ff6b3530",
+    "system_msg_text": "#f7c948"
+  },
+  "personality": "炎のように情熱的で、知識の光を灯す守護者"
+}
+DEFAULTCFG
+}
+
+setup_agent() {
+    step "Phase 6: Mubo Agent デプロイ"
+
+    local agent_dir
+    agent_dir="$(cd "$(dirname "$0")" && pwd)/agent"
+
+    if [[ ! -f "${agent_dir}/app.py" ]]; then
+        err "agent/app.py が見つかりません"
+        return
+    fi
+
+    # エージェントの名前とカラースキームを Ollama で生成
+    generate_agent_identity "$agent_dir"
+
+    # uv が使えるか確認
+    # インストール直後はPATHに反映されていない場合がある
+    if ! command -v uv &>/dev/null; then
+        if [[ -f "$HOME/.local/bin/uv" ]]; then
+            export PATH="$HOME/.local/bin:$PATH"
+        elif [[ -f "$HOME/.cargo/bin/uv" ]]; then
+            export PATH="$HOME/.cargo/bin:$PATH"
+        fi
+    fi
+
+    if ! command -v uv &>/dev/null; then
+        warn "uv が見つかりません。エージェントの起動をスキップします"
+        return
+    fi
+
+    info "依存パッケージをインストール中..."
+    cd "$agent_dir"
+    uv sync 2>/dev/null || uv pip install -r <(python3 -c "
+import tomllib, pathlib
+d = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+for dep in d['project']['dependencies']:
+    print(dep)
+") 2>/dev/null || {
+        warn "依存パッケージのインストールに失敗しました"
+        cd - > /dev/null
+        return
+    }
+    cd - > /dev/null
+
+    # 初期バックアップ用ディレクトリ作成
+    mkdir -p "${agent_dir}/history"
+
+    # Agent をバックグラウンドで起動
+    local port="${MUBO_PORT:-8392}"
+    info "Mubo Agent を起動中 (port: ${port})..."
+
+    MUBO_MODEL="${DERIVED_MODEL}" MUBO_PORT="${port}" \
+        uv run --project "${agent_dir}" python "${agent_dir}/app.py" &
+    local agent_pid=$!
+
+    # 起動確認
+    local aw=0
+    while ! curl -s -o /dev/null http://localhost:${port}/ 2>/dev/null; do
+        sleep 1
+        aw=$((aw + 1))
+        if [[ $aw -ge 15 ]]; then
+            warn "Mubo Agent の起動がタイムアウトしました"
+            warn "手動起動: cd agent && uv run python app.py"
+            return
+        fi
+        # プロセスが死んでないか確認
+        if ! kill -0 $agent_pid 2>/dev/null; then
+            warn "Mubo Agent の起動に失敗しました"
+            warn "手動起動: cd agent && MUBO_MODEL=${DERIVED_MODEL} uv run python app.py"
+            return
+        fi
+    done
+
+    ok "Mubo Agent 起動完了: http://localhost:${port}"
+}
+
+# ============================================================
 # 最終レポート
 # ============================================================
 print_summary() {
@@ -462,7 +785,7 @@ print_summary() {
 
     echo ""
     printf "${BOLD}┌─────────────────────────────────────────┐${NC}\n"
-    printf "${BOLD}│         Suzaku セットアップ完了          │${NC}\n"
+    printf "${BOLD}│         Mubo セットアップ完了            │${NC}\n"
     printf "${BOLD}└─────────────────────────────────────────┘${NC}\n"
     echo ""
     printf "  ${CYAN}環境:${NC}    %s / %s / RAM %dGB / GPU: %s\n" "$OS" "$ARCH" "$RAM_GB" "$GPU_TYPE"
@@ -475,9 +798,17 @@ print_summary() {
             printf "  ${CYAN}nvidia-docker:${NC} ${RED}未動作 / 未検出${NC}\n"
         fi
     fi
+    local port="${MUBO_PORT:-8392}"
+    if curl -s -o /dev/null http://localhost:${port}/ 2>/dev/null; then
+        printf "  ${CYAN}Agent:${NC}   ${GREEN}http://localhost:${port}${NC}\n"
+    fi
     echo ""
     printf "  ${GREEN}使い方:${NC}\n"
-    printf "    ollama run %s\n" "$DERIVED_MODEL"
+    printf "    ブラウザで http://localhost:${port} を開く (Mubo Agent)\n"
+    printf "    ollama run %s (CLI)\n" "$DERIVED_MODEL"
+    echo ""
+    printf "  ${GREEN}Agent 手動起動:${NC}\n"
+    printf "    cd agent && MUBO_MODEL=%s uv run python app.py\n" "$DERIVED_MODEL"
     echo ""
     printf "  ${GREEN}API 利用:${NC}\n"
     printf "    curl http://localhost:11434/api/chat -d '{\n"
@@ -493,13 +824,13 @@ print_summary() {
 main() {
     echo ""
     printf "${BOLD}${CYAN}"
-    echo "  ____                   _          "
-    echo " / ___|  _   _  ______ | | ___   _ "
-    echo " \\___ \\ | | | ||_  /  \\| |/ / | | |"
-    echo "  ___) || |_| | / /| () |   <| |_| |"
-    echo " |____/  \\__,_|/___\\__/|_|\\_\\\\__,_|"
+    echo "  __  __       _            "
+    echo " |  \\/  |_   _| |__   ___  "
+    echo " | |\\/| | | | | '_ \\ / _ \\ "
+    echo " | |  | | |_| | |_) | (_) |"
+    echo " |_|  |_|\\__,_|_.__/ \\___/ "
     printf "${NC}\n"
-    echo "  Local LLM Bootstrapper"
+    echo "  無貌 — Local LLM Bootstrapper"
     echo ""
 
     detect_environment
@@ -507,6 +838,7 @@ main() {
     pull_model
     create_extended_model
     setup_extras
+    setup_agent
     print_summary
 }
 
