@@ -599,10 +599,10 @@ body {{
 }}
 .message.tool-use {{
     align-self: flex-start;
-    background: {c['system_msg_bg']};
-    border: 1px solid {c['accent']}40;
+    background: #000000;
+    border: 1px solid #444;
     font-size: 0.85em;
-    color: {c['accent']};
+    color: #ffffff;
     padding: 8px 14px;
     border-radius: 8px;
     font-family: monospace;
@@ -614,7 +614,7 @@ body {{
     display: inline-block;
     width: 14px;
     height: 14px;
-    border: 2px solid {c['accent']};
+    border: 2px solid #ffffff;
     border-top-color: transparent;
     border-radius: 50%;
     animation: tool-spin 0.8s linear infinite;
@@ -625,16 +625,17 @@ body {{
     border: none;
     width: auto;
     height: auto;
+    color: #4caf50;
 }}
 .message.tool-use.done .tool-icon::after {{
     content: "✓";
 }}
 .message.tool-result {{
     align-self: flex-start;
-    background: {c['bg_secondary']};
-    border: 1px solid {c['accent']}20;
+    background: #000000;
+    border: 1px solid #444;
     font-size: 0.8em;
-    color: {c['text_secondary']};
+    color: #e0e0e0;
     padding: 10px 14px;
     border-radius: 8px;
     max-height: 200px;
