@@ -3,10 +3,10 @@ set -euo pipefail
 
 # ============================================================
 # Mubo (無貌) — One-shot Local LLM Bootstrapper
-# spec.md に基づく自動環境セットアップスクリプト
+# Automated environment setup script based on spec.md
 # ============================================================
 
-# ---------- 色付き出力ヘルパー ----------
+# ---------- Colored Output Helpers ----------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,7 +21,7 @@ warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
 err()   { printf "${RED}[ERROR]${NC} %s\n" "$*"; }
 step()  { printf "\n${BOLD}${CYAN}── %s ──${NC}\n" "$*"; }
 
-# ---------- グローバル変数 ----------
+# ---------- Global Variables ----------
 OS=""
 ARCH=""
 RAM_GB=0
@@ -33,27 +33,27 @@ NVIDIA_DOCKER_OK=false
 OLLAMA_INSTALLED=false
 BASE_MODEL="gpt-oss:20b"
 DERIVED_MODEL="gpt-oss:20b-long"
-CTX_LENGTH=65536      # デフォルト 64K
+CTX_LENGTH=65536      # Default 64K
 
 # ============================================================
-# Phase 1: 環境調査
+# Phase 1: Environment Detection
 # ============================================================
 detect_environment() {
-    step "Phase 1: 環境調査"
+    step "Phase 1: Environment Detection"
 
     # --- OS ---
     case "$(uname -s)" in
         Darwin) OS="macos" ;;
         Linux)  OS="linux" ;;
         *)
-            err "未対応の OS: $(uname -s)"
-            err "macOS または Linux が必要です"
+            err "Unsupported OS: $(uname -s)"
+            err "macOS or Linux is required"
             exit 1
             ;;
     esac
     info "OS: ${OS}"
 
-    # --- アーキテクチャ ---
+    # --- Architecture ---
     ARCH="$(uname -m)"
     info "Arch: ${ARCH}"
 
@@ -68,29 +68,29 @@ detect_environment() {
     # --- GPU ---
     detect_gpu
 
-    # --- サマリ ---
-    ok "環境調査完了: OS=${OS}, Arch=${ARCH}, RAM=${RAM_GB}GB, GPU=${GPU_TYPE}"
+    # --- Summary ---
+    ok "Environment detection complete: OS=${OS}, Arch=${ARCH}, RAM=${RAM_GB}GB, GPU=${GPU_TYPE}"
     if [[ "$GPU_TYPE" == "nvidia" ]]; then
         info "NVIDIA VRAM: ${GPU_VRAM_GB} GB"
     fi
     if [[ "$UNIFIED_MEM" == true ]]; then
-        info "Apple Silicon ユニファイドメモリ検出"
+        info "Apple Silicon unified memory detected"
     fi
     if [[ "$HAS_NPU" == true ]]; then
-        info "NPU (Neural Engine) 検出"
+        info "NPU (Neural Engine) detected"
     fi
 }
 
 detect_gpu() {
     if [[ "$OS" == "macos" ]]; then
-        # Apple Silicon チェック
+        # Apple Silicon check
         if [[ "$ARCH" == "arm64" ]]; then
             GPU_TYPE="apple"
             UNIFIED_MEM=true
             HAS_NPU=true
-            GPU_VRAM_GB=$RAM_GB  # ユニファイドメモリなので RAM=VRAM
+            GPU_VRAM_GB=$RAM_GB  # Unified memory: RAM=VRAM
         else
-            # Intel Mac — 外部GPU検出は best-effort
+            # Intel Mac — external GPU detection is best-effort
             if system_profiler SPDisplaysDataType 2>/dev/null | grep -qi "AMD\|Radeon"; then
                 GPU_TYPE="amd"
             fi
@@ -107,29 +107,29 @@ detect_gpu() {
 }
 
 # ============================================================
-# Phase 2: Ollama 導入 & 疎通確認
+# Phase 2: Ollama Installation & Connectivity Check
 # ============================================================
 setup_ollama() {
-    step "Phase 2: Ollama 導入 & 疎通確認"
+    step "Phase 2: Ollama Installation & Connectivity Check"
 
-    # --- インストール確認 ---
+    # --- Installation check ---
     if command -v ollama &>/dev/null; then
         OLLAMA_INSTALLED=true
-        ok "Ollama は既にインストール済み: $(ollama --version 2>/dev/null || echo 'version unknown')"
+        ok "Ollama is already installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
     else
-        info "Ollama が見つかりません。インストールします..."
+        info "Ollama not found. Installing..."
         install_ollama
     fi
 
-    # --- サーバー起動確認 ---
+    # --- Server startup check ---
     ensure_ollama_running
 }
 
 install_prerequisites() {
     if [[ "$OS" == "linux" ]]; then
-        # zstd は Ollama インストーラーが必要とする
+        # zstd is required by the Ollama installer
         if ! command -v zstd &>/dev/null; then
-            info "zstd をインストール中 (Ollama インストールに必要)..."
+            info "Installing zstd (required for Ollama installation)..."
             if command -v apt-get &>/dev/null; then
                 sudo apt-get install -y zstd
             elif command -v dnf &>/dev/null; then
@@ -139,7 +139,7 @@ install_prerequisites() {
             elif command -v pacman &>/dev/null; then
                 sudo pacman -S --noconfirm zstd
             else
-                warn "zstd を自動インストールできません。手動でインストールしてください"
+                warn "Cannot auto-install zstd. Please install it manually"
             fi
         fi
     fi
@@ -148,29 +148,29 @@ install_prerequisites() {
 install_docker() {
     if [[ "$OS" == "macos" ]]; then
         if command -v brew &>/dev/null; then
-            info "Homebrew 経由で Docker をインストール中..."
+            info "Installing Docker via Homebrew..."
             brew install --cask docker
-            ok "Docker Desktop インストール完了"
-            info "Docker Desktop を起動中..."
+            ok "Docker Desktop installation complete"
+            info "Starting Docker Desktop..."
             open -a Docker 2>/dev/null || true
-            # 起動を待つ
+            # Wait for startup
             local dw=0
             while ! docker info &>/dev/null 2>&1; do
                 sleep 2
                 dw=$((dw + 2))
                 if [[ $dw -ge 60 ]]; then
-                    warn "Docker Desktop の起動に時間がかかっています"
+                    warn "Docker Desktop is taking a long time to start"
                     break
                 fi
             done
         else
-            err "Docker Desktop のインストールには Homebrew が必要です"
+            err "Homebrew is required to install Docker Desktop"
             info "  Homebrew: https://brew.sh"
-            info "  または手動: https://docs.docker.com/desktop/install/mac-install/"
+            info "  Or install manually: https://docs.docker.com/desktop/install/mac-install/"
             return 1
         fi
     elif [[ "$OS" == "linux" ]]; then
-        info "Docker Engine をインストール中..."
+        info "Installing Docker Engine..."
         if command -v apt-get &>/dev/null; then
             # Debian/Ubuntu
             sudo apt-get update -y
@@ -191,16 +191,16 @@ install_docker() {
             sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || true
             sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
         else
-            # フォールバック: 公式convenience script
-            info "公式インストールスクリプトで Docker をインストール中..."
+            # Fallback: official convenience script
+            info "Installing Docker via official install script..."
             curl -fsSL https://get.docker.com | sh
         fi
-        # デーモン起動 & 現ユーザーをdockerグループに追加
+        # Start daemon & add current user to docker group
         sudo systemctl enable docker 2>/dev/null || true
         sudo systemctl start docker 2>/dev/null || true
         sudo usermod -aG docker "$USER" 2>/dev/null || true
-        ok "Docker Engine インストール完了"
-        info "dockerグループの反映には再ログインが必要な場合があります"
+        ok "Docker Engine installation complete"
+        info "You may need to re-login for docker group membership to take effect"
     fi
 }
 
@@ -209,23 +209,23 @@ install_ollama() {
 
     if [[ "$OS" == "macos" ]]; then
         if command -v brew &>/dev/null; then
-            info "Homebrew 経由で Ollama をインストール中..."
+            info "Installing Ollama via Homebrew..."
             brew install ollama
         else
-            info "公式インストールスクリプトで Ollama をインストール中..."
+            info "Installing Ollama via official install script..."
             curl -fsSL https://ollama.com/install.sh | sh
         fi
     elif [[ "$OS" == "linux" ]]; then
-        info "公式インストールスクリプトで Ollama をインストール中..."
+        info "Installing Ollama via official install script..."
         curl -fsSL https://ollama.com/install.sh | sh
     fi
 
     if command -v ollama &>/dev/null; then
         OLLAMA_INSTALLED=true
-        ok "Ollama インストール完了"
+        ok "Ollama installation complete"
     else
-        err "Ollama のインストールに失敗しました"
-        err "手動インストール: https://ollama.com/download"
+        err "Ollama installation failed"
+        err "Manual installation: https://ollama.com/download"
         exit 1
     fi
 }
@@ -234,22 +234,22 @@ ensure_ollama_running() {
     local max_wait=30
     local waited=0
 
-    # 既に動作中か確認
+    # Check if already running
     if curl -s -o /dev/null -w "%{http_code}" http://localhost:11434/api/tags 2>/dev/null | grep -q "200"; then
-        ok "Ollama サーバーは稼働中"
+        ok "Ollama server is running"
         return
     fi
 
-    info "Ollama サーバーを起動します..."
+    info "Starting Ollama server..."
     if [[ "$OS" == "macos" ]]; then
-        # macOS: アプリとして起動 or バックグラウンド
+        # macOS: launch as app or background
         if [[ -d "/Applications/Ollama.app" ]]; then
             open -a Ollama
         else
             ollama serve &>/dev/null &
         fi
     else
-        # Linux: systemd or バックグラウンド
+        # Linux: systemd or background
         if systemctl is-enabled ollama &>/dev/null 2>&1; then
             sudo systemctl start ollama 2>/dev/null || ollama serve &>/dev/null &
         else
@@ -257,54 +257,54 @@ ensure_ollama_running() {
         fi
     fi
 
-    # 疎通待ち
-    info "Ollama サーバーの起動を待機中..."
+    # Wait for connectivity
+    info "Waiting for Ollama server to start..."
     while ! curl -s -o /dev/null http://localhost:11434/api/tags 2>/dev/null; do
         sleep 1
         waited=$((waited + 1))
         if [[ $waited -ge $max_wait ]]; then
-            err "Ollama サーバーの起動がタイムアウトしました (${max_wait}秒)"
-            err "'ollama serve' を別ターミナルで手動実行してください"
+            err "Ollama server startup timed out (${max_wait}s)"
+            err "Please run 'ollama serve' manually in another terminal"
             exit 1
         fi
     done
-    ok "Ollama サーバー疎通確認完了"
+    ok "Ollama server connectivity confirmed"
 }
 
 # ============================================================
-# Phase 3: モデル取得
+# Phase 3: Model Download
 # ============================================================
 pull_model() {
-    step "Phase 3: モデル取得 (${BASE_MODEL})"
+    step "Phase 3: Model Download (${BASE_MODEL})"
 
-    # 既にダウンロード済みか確認
+    # Check if already downloaded
     if ollama list 2>/dev/null | grep -q "${BASE_MODEL}"; then
-        ok "${BASE_MODEL} は既にダウンロード済み"
+        ok "${BASE_MODEL} is already downloaded"
         return
     fi
 
-    info "${BASE_MODEL} をダウンロード中... (サイズが大きいため時間がかかります)"
+    info "Downloading ${BASE_MODEL}... (this may take a while due to large file size)"
     if ollama pull "${BASE_MODEL}"; then
-        ok "${BASE_MODEL} のダウンロード完了"
+        ok "${BASE_MODEL} download complete"
     else
-        err "${BASE_MODEL} のダウンロードに失敗しました"
-        err "ネットワーク接続を確認してください"
+        err "${BASE_MODEL} download failed"
+        err "Please check your network connection"
         exit 1
     fi
 }
 
 # ============================================================
-# Phase 4: コンテキスト長拡張の派生モデル生成
+# Phase 4: Extended Context Derived Model Creation
 # ============================================================
 create_extended_model() {
-    step "Phase 4: コンテキスト長拡張モデル生成"
+    step "Phase 4: Extended Context Model Creation"
 
-    # RAM に応じてコンテキスト長を決定
+    # Determine context length based on RAM
     decide_context_length
 
-    # 既に存在する場合はスキップ
+    # Skip if already exists
     if ollama list 2>/dev/null | grep -q "${DERIVED_MODEL}"; then
-        warn "${DERIVED_MODEL} は既に存在します。再作成します..."
+        warn "${DERIVED_MODEL} already exists. Recreating..."
     fi
 
     local modelfile
@@ -316,21 +316,21 @@ PARAMETER num_ctx ${CTX_LENGTH}
 PARAMETER num_gpu 999
 EOF
 
-    info "Modelfile 生成: ctx=${CTX_LENGTH} ($(( CTX_LENGTH / 1024 ))K)"
-    info "派生モデル ${DERIVED_MODEL} を作成中..."
+    info "Modelfile generated: ctx=${CTX_LENGTH} ($(( CTX_LENGTH / 1024 ))K)"
+    info "Creating derived model ${DERIVED_MODEL}..."
 
     if ollama create "${DERIVED_MODEL}" -f "$modelfile"; then
-        ok "${DERIVED_MODEL} 作成完了 (ctx=$(( CTX_LENGTH / 1024 ))K)"
+        ok "${DERIVED_MODEL} created (ctx=$(( CTX_LENGTH / 1024 ))K)"
     else
-        err "派生モデルの作成に失敗しました"
-        warn "ベースモデル ${BASE_MODEL} はそのまま利用可能です"
+        err "Derived model creation failed"
+        warn "Base model ${BASE_MODEL} is still available"
     fi
 
     rm -f "$modelfile"
 }
 
 decide_context_length() {
-    # Apple Silicon ユニファイドメモリ or 大容量 VRAM → 128K を狙う
+    # Apple Silicon unified memory or large VRAM -> aim for 128K
     local available_mem=$RAM_GB
     if [[ "$GPU_TYPE" == "nvidia" ]] && (( GPU_VRAM_GB > 0 )); then
         available_mem=$GPU_VRAM_GB
@@ -338,42 +338,42 @@ decide_context_length() {
 
     if (( available_mem >= 64 )); then
         CTX_LENGTH=131072   # 128K
-        info "メモリ十分 (${available_mem}GB): 128K コンテキストを設定"
+        info "Sufficient memory (${available_mem}GB): setting 128K context"
     elif (( available_mem >= 32 )); then
         CTX_LENGTH=65536    # 64K
-        info "メモリ中程度 (${available_mem}GB): 64K コンテキストを設定"
+        info "Moderate memory (${available_mem}GB): setting 64K context"
     elif (( available_mem >= 16 )); then
         CTX_LENGTH=32768    # 32K
-        warn "メモリが限定的 (${available_mem}GB): 32K コンテキストに制限"
+        warn "Limited memory (${available_mem}GB): restricting to 32K context"
     else
         CTX_LENGTH=16384    # 16K
-        warn "メモリが少ない (${available_mem}GB): 16K コンテキストに制限"
+        warn "Low memory (${available_mem}GB): restricting to 16K context"
     fi
 }
 
 # ============================================================
-# Phase 5: 追加環境 (任意・失敗しても本線に影響なし)
+# Phase 5: Additional Environment (optional, failures do not affect core setup)
 # ============================================================
 setup_extras() {
-    step "Phase 5: 追加環境セットアップ (任意)"
+    step "Phase 5: Additional Environment Setup (optional)"
 
-    info "追加環境は失敗しても Ollama + ${DERIVED_MODEL} は利用可能です"
+    info "Even if additional setup fails, Ollama + ${DERIVED_MODEL} remains available"
 
-    # --- uv (Python パッケージマネージャ) ---
+    # --- uv (Python package manager) ---
     setup_uv
 
-    # --- vLLM (Linux + NVIDIA GPU のみ) ---
+    # --- vLLM (Linux + NVIDIA GPU only) ---
     if [[ "$OS" == "linux" && "$GPU_TYPE" == "nvidia" ]]; then
         setup_vllm
     else
-        info "vLLM: スキップ (Linux + NVIDIA GPU 環境のみ対象)"
+        info "vLLM: skipped (Linux + NVIDIA GPU only)"
     fi
 
-    # --- MLX (macOS Apple Silicon のみ) ---
+    # --- MLX (macOS Apple Silicon only) ---
     if [[ "$OS" == "macos" && "$ARCH" == "arm64" ]]; then
         setup_mlx
     else
-        info "MLX: スキップ (macOS Apple Silicon 環境のみ対象)"
+        info "MLX: skipped (macOS Apple Silicon only)"
     fi
 
     # --- Docker ---
@@ -382,81 +382,81 @@ setup_extras() {
 
 setup_uv() {
     if command -v uv &>/dev/null; then
-        ok "uv は既にインストール済み"
+        ok "uv is already installed"
         return
     fi
 
-    info "uv をインストール中..."
+    info "Installing uv..."
     if curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null; then
-        ok "uv インストール完了"
+        ok "uv installation complete"
     else
-        warn "uv のインストールに失敗しました (本線に影響なし)"
+        warn "uv installation failed (does not affect core setup)"
     fi
 }
 
 setup_vllm() {
-    info "vLLM のセットアップを試行中..."
+    info "Attempting vLLM setup..."
 
     if ! command -v python3 &>/dev/null; then
-        warn "Python3 が見つかりません。vLLM スキップ"
+        warn "Python3 not found. Skipping vLLM"
         return
     fi
 
     if python3 -c "import vllm" 2>/dev/null; then
-        ok "vLLM は既にインストール済み"
+        ok "vLLM is already installed"
         return
     fi
 
     if pip3 install vllm 2>/dev/null || pip install vllm 2>/dev/null; then
-        ok "vLLM インストール完了"
+        ok "vLLM installation complete"
     else
-        warn "vLLM のインストールに失敗しました (本線に影響なし)"
+        warn "vLLM installation failed (does not affect core setup)"
     fi
 }
 
 setup_mlx() {
-    info "MLX のセットアップを試行中..."
+    info "Attempting MLX setup..."
 
     if ! command -v python3 &>/dev/null; then
-        warn "Python3 が見つかりません。MLX スキップ"
+        warn "Python3 not found. Skipping MLX"
         return
     fi
 
     if python3 -c "import mlx" 2>/dev/null; then
-        ok "MLX は既にインストール済み"
+        ok "MLX is already installed"
         return
     fi
 
     if pip3 install mlx mlx-lm 2>/dev/null || pip install mlx mlx-lm 2>/dev/null; then
-        ok "MLX インストール完了"
+        ok "MLX installation complete"
     else
-        warn "MLX のインストールに失敗しました (本線に影響なし)"
+        warn "MLX installation failed (does not affect core setup)"
     fi
 }
 
 setup_docker_check() {
     if ! command -v docker &>/dev/null; then
-        info "Docker が見つかりません。インストールします..."
+        info "Docker not found. Installing..."
         install_docker
     fi
 
     if ! command -v docker &>/dev/null; then
-        warn "Docker のインストールに失敗しました (本線に影響なし)"
+        warn "Docker installation failed (does not affect core setup)"
         return
     fi
 
-    # Docker デーモン起動確認
+    # Docker daemon startup check
     if ! docker info &>/dev/null 2>&1; then
-        info "Docker デーモンを起動します..."
+        info "Starting Docker daemon..."
         if [[ "$OS" == "macos" ]]; then
             open -a Docker 2>/dev/null || true
-            # Docker Desktop の起動を最大60秒待つ
+            # Wait up to 60 seconds for Docker Desktop to start
             local dw=0
             while ! docker info &>/dev/null 2>&1; do
                 sleep 2
                 dw=$((dw + 2))
                 if [[ $dw -ge 60 ]]; then
-                    warn "Docker デーモンの起動がタイムアウトしました"
+                    warn "Docker daemon startup timed out"
                     return
                 fi
             done
@@ -467,15 +467,15 @@ setup_docker_check() {
     fi
 
     if docker info &>/dev/null 2>&1; then
-        ok "Docker デーモンは稼働中"
+        ok "Docker daemon is running"
     else
-        warn "Docker はインストール済みですがデーモンが停止中です"
+        warn "Docker is installed but the daemon is not running"
         return
     fi
 
-    # --- NVIDIA Container Runtime / nvidia-docker テスト ---
+    # --- NVIDIA Container Runtime / nvidia-docker test ---
     if [[ "$OS" != "linux" || "$GPU_TYPE" != "nvidia" ]]; then
-        info "nvidia-docker テスト: スキップ (Linux + NVIDIA GPU 環境のみ対象)"
+        info "nvidia-docker test: skipped (Linux + NVIDIA GPU only)"
         return
     fi
 
@@ -483,9 +483,9 @@ setup_docker_check() {
 }
 
 test_nvidia_docker() {
-    info "nvidia-docker の動作テストを実行中..."
+    info "Running nvidia-docker functionality test..."
 
-    # 1. nvidia-container-toolkit / nvidia-docker2 がインストールされているか
+    # 1. Check if nvidia-container-toolkit / nvidia-docker2 is installed
     local has_runtime=false
     if docker info 2>/dev/null | grep -qi "nvidia"; then
         has_runtime=true
@@ -498,20 +498,20 @@ test_nvidia_docker() {
     fi
 
     if [[ "$has_runtime" == false ]]; then
-        warn "nvidia-container-toolkit が見つかりません"
-        warn "インストール手順: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+        warn "nvidia-container-toolkit not found"
+        warn "Installation guide: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
         return
     fi
-    ok "nvidia-container-toolkit 検出"
+    ok "nvidia-container-toolkit detected"
 
-    # 2. --gpus フラグで nvidia-smi が実行できるか (実動作テスト)
-    info "コンテナ内で nvidia-smi を実行してGPUアクセスを検証中..."
+    # 2. Test if nvidia-smi runs with --gpus flag (live functionality test)
+    info "Running nvidia-smi inside container to verify GPU access..."
     local test_output
     if test_output=$(docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi 2>&1); then
-        ok "nvidia-docker 動作確認: コンテナからGPUにアクセスできます"
+        ok "nvidia-docker verified: GPU is accessible from containers"
         NVIDIA_DOCKER_OK=true
 
-        # GPU 名とドライババージョンを表示
+        # Display GPU name and driver version
         local driver_ver
         driver_ver=$(echo "$test_output" | grep "Driver Version" | sed 's/.*Driver Version: *\([^ ]*\).*/\1/' | head -1)
         local gpu_name
@@ -523,38 +523,38 @@ test_nvidia_docker() {
             info "  GPU:    ${gpu_name}"
         fi
     else
-        warn "nvidia-docker 動作テスト失敗: コンテナからGPUにアクセスできません"
-        warn "エラー詳細:"
+        warn "nvidia-docker test failed: GPU is not accessible from containers"
+        warn "Error details:"
         echo "$test_output" | tail -5 | while IFS= read -r line; do
             warn "  $line"
         done
         warn ""
-        warn "トラブルシューティング:"
-        warn "  1. nvidia-container-toolkit を再インストール:"
+        warn "Troubleshooting:"
+        warn "  1. Reinstall nvidia-container-toolkit:"
         warn "     sudo apt-get install -y nvidia-container-toolkit"
         warn "     sudo nvidia-ctk runtime configure --runtime=docker"
         warn "     sudo systemctl restart docker"
-        warn "  2. Docker デーモンを再起動: sudo systemctl restart docker"
-        warn "  3. NVIDIA ドライバが正常か確認: nvidia-smi"
+        warn "  2. Restart Docker daemon: sudo systemctl restart docker"
+        warn "  3. Verify NVIDIA driver is working: nvidia-smi"
     fi
 }
 
 # ============================================================
-# Phase 6: Mubo Agent (自己書き換えAI) デプロイ & 起動
+# Phase 6: Mubo Agent (Self-Rewriting AI) Deploy & Launch
 # ============================================================
 generate_agent_identity() {
     local agent_dir="$1"
     local config_file="${agent_dir}/config.json"
 
-    # 既に config.json があればスキップ
+    # Skip if config.json already exists
     if [[ -f "$config_file" ]]; then
-        ok "エージェント設定は既に存在します"
+        ok "Agent configuration already exists"
         return
     fi
 
-    info "Ollama にエージェントの名前とカラースキームを考えさせています..."
+    info "Asking Ollama to generate agent name and color scheme..."
 
-    # マシン情報を収集
+    # Collect machine information
     local hostname
     hostname="$(hostname 2>/dev/null || echo 'unknown')"
     local username
@@ -573,7 +573,7 @@ generate_agent_identity() {
     current_hour="$(date +%H)"
     local term_program
     term_program="${TERM_PROGRAM:-unknown}"
-    # macOS: ダークモード判定
+    # macOS: dark mode detection
     local os_appearance="unknown"
     if [[ "$OS" == "macos" ]]; then
         if defaults read -g AppleInterfaceStyle &>/dev/null 2>&1; then
@@ -655,31 +655,43 @@ If the locale is ja_JP, translate to Japanese. If en_US, keep English. If fr_FR,
   }
 }"
 
-    local response
-    response=$(curl -s --max-time 60 "${OLLAMA_BASE:-http://localhost:11434}/api/generate" \
-        -d "$(printf '{"model":"%s","prompt":"%s","stream":false,"options":{"temperature":0.8}}' \
-            "${BASE_MODEL}" \
-            "$(echo "$prompt" | sed 's/"/\\"/g' | tr '\n' ' ')")" \
-        2>/dev/null)
+    # Build the JSON request body via python to avoid shell escaping issues
+    local request_body
+    request_body=$(python3 -c "
+import json
+prompt = '''$prompt'''
+body = {'model': '${BASE_MODEL}', 'prompt': prompt, 'stream': False, 'options': {'temperature': 0.8}}
+print(json.dumps(body))
+" 2>/dev/null)
 
-    if [[ -z "$response" ]]; then
-        warn "Ollama からの応答がありません。デフォルト設定を使用します"
+    if [[ -z "$request_body" ]]; then
+        warn "Failed to build request. Using default configuration"
         _write_default_config "$config_file"
         return
     fi
 
-    # Ollama の response フィールドから JSON を抽出
+    local response
+    response=$(curl -s --max-time 180 "${OLLAMA_BASE:-http://localhost:11434}/api/generate" \
+        -H "Content-Type: application/json" \
+        -d "$request_body" \
+        2>/dev/null)
+
+    if [[ -z "$response" ]]; then
+        warn "No response from Ollama. Using default configuration"
+        _write_default_config "$config_file"
+        return
+    fi
+
+    # Extract JSON from Ollama's response field
     local llm_output
     llm_output=$(echo "$response" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
     text = data.get('response', '')
-    # JSON部分を抽出
     start = text.find('{')
     end = text.rfind('}') + 1
     if start >= 0 and end > start:
-        # パース確認
         config = json.loads(text[start:end])
         print(json.dumps(config, ensure_ascii=False, indent=2))
     else:
@@ -692,10 +704,10 @@ except:
         echo "$llm_output" > "$config_file"
         local agent_name
         agent_name=$(python3 -c "import json; d=json.load(open('${config_file}')); print(d.get('agent_name','Mubo'))" 2>/dev/null)
-        ok "エージェント名: ${agent_name}"
-        info "カラースキーム生成完了"
+        ok "Agent name: ${agent_name}"
+        info "Color scheme generation complete"
     else
-        warn "LLM出力のパースに失敗しました。デフォルト設定を使用します"
+        warn "Failed to parse LLM output. Using default configuration"
         _write_default_config "$config_file"
     fi
 }
@@ -757,21 +769,21 @@ DEFAULTCFG
 }
 
 setup_agent() {
-    step "Phase 6: Mubo Agent デプロイ"
+    step "Phase 6: Mubo Agent Deploy"
 
     local agent_dir
     agent_dir="$(cd "$(dirname "$0")" && pwd)/agent"
 
     if [[ ! -f "${agent_dir}/app.py" ]]; then
-        err "agent/app.py が見つかりません"
+        err "agent/app.py not found"
         return
     fi
 
-    # エージェントの名前とカラースキームを Ollama で生成
+    # Generate agent name and color scheme using Ollama
     generate_agent_identity "$agent_dir"
 
-    # uv が使えるか確認
-    # インストール直後はPATHに反映されていない場合がある
+    # Check if uv is available
+    # PATH may not be updated immediately after installation
     if ! command -v uv &>/dev/null; then
         if [[ -f "$HOME/.local/bin/uv" ]]; then
             export PATH="$HOME/.local/bin:$PATH"
@@ -781,11 +793,11 @@ setup_agent() {
     fi
 
     if ! command -v uv &>/dev/null; then
-        warn "uv が見つかりません。エージェントの起動をスキップします"
+        warn "uv not found. Skipping agent launch"
         return
     fi
 
-    info "依存パッケージをインストール中..."
+    info "Installing dependencies..."
     cd "$agent_dir"
     uv sync 2>/dev/null || uv pip install -r <(python3 -c "
 import tomllib, pathlib
@@ -793,63 +805,60 @@ d = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
 for dep in d['project']['dependencies']:
     print(dep)
 ") 2>/dev/null || {
-        warn "依存パッケージのインストールに失敗しました"
+        warn "Dependency installation failed"
         cd - > /dev/null
         return
     }
     cd - > /dev/null
 
-    # 初期バックアップ用ディレクトリ作成
-    mkdir -p "${agent_dir}/history"
-
-    # Agent をバックグラウンドで起動
+    # Launch Agent in the background
     local port="${MUBO_PORT:-8392}"
-    info "Mubo Agent を起動中 (port: ${port})..."
+    info "Starting Mubo Agent (port: ${port})..."
 
     MUBO_MODEL="${DERIVED_MODEL}" MUBO_PORT="${port}" \
         uv run --project "${agent_dir}" python "${agent_dir}/app.py" &
     local agent_pid=$!
 
-    # 起動確認
+    # Verify startup
     local aw=0
     while ! curl -s -o /dev/null http://localhost:${port}/ 2>/dev/null; do
         sleep 1
         aw=$((aw + 1))
         if [[ $aw -ge 15 ]]; then
-            warn "Mubo Agent の起動がタイムアウトしました"
-            warn "手動起動: cd agent && uv run python app.py"
+            warn "Mubo Agent startup timed out"
+            warn "Manual start: cd agent && uv run python app.py"
             return
         fi
-        # プロセスが死んでないか確認
+        # Check if process is still alive
         if ! kill -0 $agent_pid 2>/dev/null; then
-            warn "Mubo Agent の起動に失敗しました"
-            warn "手動起動: cd agent && MUBO_MODEL=${DERIVED_MODEL} uv run python app.py"
+            warn "Mubo Agent failed to start"
+            warn "Manual start: cd agent && MUBO_MODEL=${DERIVED_MODEL} uv run python app.py"
             return
         fi
     done
 
-    ok "Mubo Agent 起動完了: http://localhost:${port}"
+    ok "Mubo Agent started: http://localhost:${port}"
 }
 
 # ============================================================
-# 最終レポート
+# Final Report
 # ============================================================
 print_summary() {
-    step "セットアップ完了"
+    step "Setup Complete"
 
     echo ""
     printf "${BOLD}┌─────────────────────────────────────────┐${NC}\n"
-    printf "${BOLD}│         Mubo セットアップ完了            │${NC}\n"
+    printf "${BOLD}│         Mubo Setup Complete              │${NC}\n"
     printf "${BOLD}└─────────────────────────────────────────┘${NC}\n"
     echo ""
-    printf "  ${CYAN}環境:${NC}    %s / %s / RAM %dGB / GPU: %s\n" "$OS" "$ARCH" "$RAM_GB" "$GPU_TYPE"
+    printf "  ${CYAN}Env:${NC}     %s / %s / RAM %dGB / GPU: %s\n" "$OS" "$ARCH" "$RAM_GB" "$GPU_TYPE"
     printf "  ${CYAN}Ollama:${NC}  http://localhost:11434\n"
-    printf "  ${CYAN}モデル:${NC}  %s (ctx %dK)\n" "$DERIVED_MODEL" "$(( CTX_LENGTH / 1024 ))"
+    printf "  ${CYAN}Model:${NC}   %s (ctx %dK)\n" "$DERIVED_MODEL" "$(( CTX_LENGTH / 1024 ))"
     if [[ "$OS" == "linux" && "$GPU_TYPE" == "nvidia" ]]; then
         if [[ "$NVIDIA_DOCKER_OK" == true ]]; then
             printf "  ${CYAN}nvidia-docker:${NC} ${GREEN}OK${NC}\n"
         else
-            printf "  ${CYAN}nvidia-docker:${NC} ${RED}未動作 / 未検出${NC}\n"
+            printf "  ${CYAN}nvidia-docker:${NC} ${RED}Not working / Not detected${NC}\n"
         fi
     fi
     local port="${MUBO_PORT:-8392}"
@@ -857,14 +866,14 @@ print_summary() {
         printf "  ${CYAN}Agent:${NC}   ${GREEN}http://localhost:${port}${NC}\n"
     fi
     echo ""
-    printf "  ${GREEN}使い方:${NC}\n"
-    printf "    ブラウザで http://localhost:${port} を開く (Mubo Agent)\n"
+    printf "  ${GREEN}Usage:${NC}\n"
+    printf "    Open http://localhost:${port} in your browser (Mubo Agent)\n"
     printf "    ollama run %s (CLI)\n" "$DERIVED_MODEL"
     echo ""
-    printf "  ${GREEN}Agent 手動起動:${NC}\n"
+    printf "  ${GREEN}Manual Agent Start:${NC}\n"
     printf "    cd agent && MUBO_MODEL=%s uv run python app.py\n" "$DERIVED_MODEL"
     echo ""
-    printf "  ${GREEN}API 利用:${NC}\n"
+    printf "  ${GREEN}API Usage:${NC}\n"
     printf "    curl http://localhost:11434/api/chat -d '{\n"
     printf "      \"model\": \"%s\",\n" "$DERIVED_MODEL"
     printf "      \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]\n"
@@ -873,21 +882,21 @@ print_summary() {
 }
 
 # ============================================================
-# メイン実行
+# Main Execution
 # ============================================================
 install_git() {
     if command -v git &>/dev/null; then
         return
     fi
-    info "git が見つかりません。インストールします..."
+    info "git not found. Installing..."
     case "$(uname -s)" in
         Darwin)
             if command -v brew &>/dev/null; then
                 brew install git
             else
-                info "Xcode Command Line Tools 経由で git をインストール中..."
+                info "Installing git via Xcode Command Line Tools..."
                 xcode-select --install 2>/dev/null || true
-                # xcode-select は対話的なので、完了を待つ
+                # xcode-select is interactive, wait for completion
                 until command -v git &>/dev/null; do
                     sleep 3
                 done
@@ -905,21 +914,21 @@ install_git() {
             elif command -v apk &>/dev/null; then
                 sudo apk add git
             else
-                err "git を自動インストールできません。手動でインストールしてください"
+                err "Cannot auto-install git. Please install it manually"
                 exit 1
             fi
             ;;
     esac
     if command -v git &>/dev/null; then
-        ok "git インストール完了"
+        ok "git installation complete"
     else
-        err "git のインストールに失敗しました"
+        err "git installation failed"
         exit 1
     fi
 }
 
 check_for_updates() {
-    # gitリポジトリ内でなければスキップ
+    # Skip if not inside a git repository
     if ! git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
         return
     fi
@@ -930,11 +939,11 @@ check_for_updates() {
         return
     fi
 
-    info "アップデートを確認中..."
+    info "Checking for updates..."
 
-    # リモートの最新情報を取得（通信エラーは無視）
+    # Fetch latest from remote (ignore connection errors)
     if ! git -C "$repo_dir" fetch origin --quiet 2>/dev/null; then
-        warn "リモートへの接続に失敗しました。オフラインで続行します"
+        warn "Failed to connect to remote. Continuing offline"
         return
     fi
 
@@ -944,49 +953,49 @@ check_for_updates() {
                   git -C "$repo_dir" rev-parse origin/master 2>/dev/null || echo "")
 
     if [[ -z "$remote_head" ]]; then
-        warn "リモートブランチが見つかりません。スキップします"
+        warn "Remote branch not found. Skipping"
         return
     fi
 
     if [[ "$local_head" == "$remote_head" ]]; then
-        ok "最新バージョンです"
+        ok "Already up to date"
         return
     fi
 
-    # 差分のコミット数を表示
+    # Show number of commits behind
     local behind
     behind=$(git -C "$repo_dir" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
-    info "新しいバージョンがあります (${behind} commits behind)"
-    info "アップデート中..."
+    info "A newer version is available (${behind} commits behind)"
+    info "Updating..."
 
-    # ユーザーのローカル変更を保護
+    # Protect user's local changes
     local has_changes=false
     if ! git -C "$repo_dir" diff --quiet 2>/dev/null || \
        ! git -C "$repo_dir" diff --cached --quiet 2>/dev/null; then
         has_changes=true
-        info "ローカル変更を一時退避します..."
+        info "Stashing local changes..."
         git -C "$repo_dir" stash push -m "mubo-auto-update-$(date +%Y%m%d_%H%M%S)" --quiet 2>/dev/null || true
     fi
 
-    # プル
+    # Pull
     if git -C "$repo_dir" pull --ff-only origin main --quiet 2>/dev/null; then
-        ok "アップデート完了"
-        # 退避した変更を復元
+        ok "Update complete"
+        # Restore stashed changes
         if [[ "$has_changes" == true ]]; then
             if git -C "$repo_dir" stash pop --quiet 2>/dev/null; then
-                ok "ローカル変更を復元しました"
+                ok "Local changes restored"
             else
-                warn "ローカル変更の復元でコンフリクトが発生しました"
-                warn "手動で解決してください: git stash pop"
+                warn "Conflict occurred while restoring local changes"
+                warn "Please resolve manually: git stash pop"
             fi
         fi
-        # setup.sh 自体が更新された可能性があるので再実行
-        info "更新されたスクリプトで再起動します..."
+        # setup.sh itself may have been updated, so re-execute
+        info "Restarting with updated script..."
         exec bash "$repo_dir/setup.sh" "$@"
     else
-        warn "fast-forward マージができませんでした"
-        warn "手動で更新してください: git pull"
-        # stash を戻す
+        warn "Fast-forward merge was not possible"
+        warn "Please update manually: git pull"
+        # Restore stash
         if [[ "$has_changes" == true ]]; then
             git -C "$repo_dir" stash pop --quiet 2>/dev/null || true
         fi
@@ -994,7 +1003,7 @@ check_for_updates() {
 }
 
 ensure_repo() {
-    # curl | bash で実行された場合、リポジトリをカレントディレクトリにcloneして再実行
+    # If run via curl | bash, clone the repository to current directory and re-execute
     if [[ ! -f "$(dirname "$0")/agent/app.py" ]] && [[ ! -f "./agent/app.py" ]]; then
         install_git
         info "Cloning mubo into current directory..."
@@ -1009,7 +1018,7 @@ ensure_repo() {
 }
 
 setup_machine_branch() {
-    # gitリポジトリ内でなければスキップ
+    # Skip if not inside a git repository
     if ! git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
         return
     fi
@@ -1020,33 +1029,33 @@ setup_machine_branch() {
         return
     fi
 
-    # マシン固有のブランチ名を生成
+    # Generate machine-specific branch name
     local hostname
     hostname="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo 'unknown')"
-    # ブランチ名に使えない文字を除去
+    # Remove characters not allowed in branch names
     hostname="$(echo "$hostname" | tr -c 'a-zA-Z0-9_-' '-')"
     local branch_name="machine/${hostname}"
 
     local current_branch
     current_branch="$(git -C "$repo_dir" branch --show-current 2>/dev/null)"
 
-    # 既にマシンブランチにいればOK
+    # Already on the machine branch
     if [[ "$current_branch" == "$branch_name" ]]; then
-        ok "マシンブランチ: ${branch_name}"
+        ok "Machine branch: ${branch_name}"
         return
     fi
 
-    # マシンブランチが存在するか
+    # Check if machine branch exists
     if git -C "$repo_dir" show-ref --verify --quiet "refs/heads/${branch_name}" 2>/dev/null; then
-        info "既存のマシンブランチに切り替え: ${branch_name}"
+        info "Switching to existing machine branch: ${branch_name}"
         git -C "$repo_dir" checkout "$branch_name" --quiet 2>/dev/null
-        # mainの更新をマージ
+        # Merge updates from main
         git -C "$repo_dir" merge main --no-edit --quiet 2>/dev/null || true
     else
-        info "マシンブランチを作成: ${branch_name}"
+        info "Creating machine branch: ${branch_name}"
         git -C "$repo_dir" checkout -b "$branch_name" --quiet 2>/dev/null
 
-        # gitユーザー設定がなければ仮設定 (コミットに必要)
+        # Set temporary git user config if not configured (required for commits)
         if ! git -C "$repo_dir" config user.name &>/dev/null; then
             git -C "$repo_dir" config user.name "mubo-agent"
         fi
@@ -1054,13 +1063,13 @@ setup_machine_branch() {
             git -C "$repo_dir" config user.email "mubo@localhost"
         fi
 
-        # 初期コミット (ベースラインとしてタグを打つ)
+        # Initial commit (tag as baseline)
         git -C "$repo_dir" add -A 2>/dev/null || true
         git -C "$repo_dir" commit --allow-empty -m "mubo: initial state for ${hostname}" --quiet 2>/dev/null || true
         git -C "$repo_dir" tag -f "mubo-initial-${hostname}" --quiet 2>/dev/null || true
     fi
 
-    ok "マシンブランチ: ${branch_name}"
+    ok "Machine branch: ${branch_name}"
 }
 
 main() {
@@ -1072,7 +1081,7 @@ main() {
     echo " | |  | | |_| | |_) | (_) |"
     echo " |_|  |_|\\__,_|_.__/ \\___/ "
     printf "${NC}\n"
-    echo "  無貌 — Local LLM Bootstrapper"
+    echo "  Mubo — Local LLM Bootstrapper"
     echo ""
 
     ensure_repo "$@"
