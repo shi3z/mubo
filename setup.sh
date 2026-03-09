@@ -864,6 +864,81 @@ install_git() {
     fi
 }
 
+check_for_updates() {
+    # gitリポジトリ内でなければスキップ
+    if ! git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+        return
+    fi
+
+    local repo_dir
+    repo_dir="$(git rev-parse --show-toplevel 2>/dev/null)"
+    if [[ -z "$repo_dir" ]]; then
+        return
+    fi
+
+    info "アップデートを確認中..."
+
+    # リモートの最新情報を取得（通信エラーは無視）
+    if ! git -C "$repo_dir" fetch origin --quiet 2>/dev/null; then
+        warn "リモートへの接続に失敗しました。オフラインで続行します"
+        return
+    fi
+
+    local local_head remote_head
+    local_head=$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)
+    remote_head=$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null || \
+                  git -C "$repo_dir" rev-parse origin/master 2>/dev/null || echo "")
+
+    if [[ -z "$remote_head" ]]; then
+        warn "リモートブランチが見つかりません。スキップします"
+        return
+    fi
+
+    if [[ "$local_head" == "$remote_head" ]]; then
+        ok "最新バージョンです"
+        return
+    fi
+
+    # 差分のコミット数を表示
+    local behind
+    behind=$(git -C "$repo_dir" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+    info "新しいバージョンがあります (${behind} commits behind)"
+    info "アップデート中..."
+
+    # ユーザーのローカル変更を保護
+    local has_changes=false
+    if ! git -C "$repo_dir" diff --quiet 2>/dev/null || \
+       ! git -C "$repo_dir" diff --cached --quiet 2>/dev/null; then
+        has_changes=true
+        info "ローカル変更を一時退避します..."
+        git -C "$repo_dir" stash push -m "mubo-auto-update-$(date +%Y%m%d_%H%M%S)" --quiet 2>/dev/null || true
+    fi
+
+    # プル
+    if git -C "$repo_dir" pull --ff-only origin main --quiet 2>/dev/null; then
+        ok "アップデート完了"
+        # 退避した変更を復元
+        if [[ "$has_changes" == true ]]; then
+            if git -C "$repo_dir" stash pop --quiet 2>/dev/null; then
+                ok "ローカル変更を復元しました"
+            else
+                warn "ローカル変更の復元でコンフリクトが発生しました"
+                warn "手動で解決してください: git stash pop"
+            fi
+        fi
+        # setup.sh 自体が更新された可能性があるので再実行
+        info "更新されたスクリプトで再起動します..."
+        exec bash "$repo_dir/setup.sh" "$@"
+    else
+        warn "fast-forward マージができませんでした"
+        warn "手動で更新してください: git pull"
+        # stash を戻す
+        if [[ "$has_changes" == true ]]; then
+            git -C "$repo_dir" stash pop --quiet 2>/dev/null || true
+        fi
+    fi
+}
+
 ensure_repo() {
     # curl | bash で実行された場合、リポジトリをcloneして再実行
     if [[ ! -f "$(dirname "$0")/agent/app.py" ]] && [[ ! -f "./agent/app.py" ]]; then
@@ -890,6 +965,7 @@ main() {
     echo ""
 
     ensure_repo "$@"
+    check_for_updates "$@"
     detect_environment
     setup_ollama
     pull_model
