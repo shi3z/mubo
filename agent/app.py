@@ -1,12 +1,12 @@
 """
 Mubo Agent — 自己書き換え可能なエージェンティックAI
-Ollamaのローカルモデルとストリーミング会話し、自身のコードを書き換える機能を持つ。
+プラグインシステムを備え、会話を通じてツールを自動的に増やせる。
 """
 
 import json
 import os
 import shutil
-import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -22,8 +22,15 @@ APP_FILE = Path(__file__).resolve()
 HISTORY_DIR = APP_FILE.parent / "history"
 INITIAL_BACKUP = HISTORY_DIR / "app.py.initial"
 CONFIG_FILE = APP_FILE.parent / "config.json"
+PLUGINS_DIR = APP_FILE.parent / "plugins"
 
-# 設定読み込み
+# ディレクトリ作成
+HISTORY_DIR.mkdir(exist_ok=True)
+PLUGINS_DIR.mkdir(exist_ok=True)
+if not INITIAL_BACKUP.exists():
+    shutil.copy2(APP_FILE, INITIAL_BACKUP)
+
+# --- 設定読み込み ---
 DEFAULT_CONFIG = {
     "agent_name": "無貌",
     "agent_name_en": "Mubo",
@@ -50,12 +57,12 @@ DEFAULT_CONFIG = {
     "personality": "炎のように情熱的で、知識の光を灯す守護者",
 }
 
+
 def _load_config():
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 cfg = json.load(f)
-            # デフォルトとマージ（足りないキーを補完）
             merged = {**DEFAULT_CONFIG, **cfg}
             merged["colors"] = {**DEFAULT_CONFIG["colors"], **cfg.get("colors", {})}
             return merged
@@ -63,37 +70,122 @@ def _load_config():
             pass
     return DEFAULT_CONFIG
 
+
 CONFIG = _load_config()
 
-# 起動時に初期バックアップを保存
-HISTORY_DIR.mkdir(exist_ok=True)
-if not INITIAL_BACKUP.exists():
-    shutil.copy2(APP_FILE, INITIAL_BACKUP)
 
-SYSTEM_PROMPT = (
-    f'あなたは「{CONFIG["agent_name"]}」({CONFIG["agent_name_en"]})、自己進化するAIアシスタントです。\n'
-    f'性格: {CONFIG.get("personality", "知的で親切なアシスタント")}\n'
-    "ユーザーとの会話に応答するだけでなく、自分自身の機能を改善するためにソースコードを書き換えることができます。\n"
-    "\n"
-    "## ツール\n"
-    "あなたは以下のツールを使えます。ツールを使う場合は、応答の中に以下のJSON形式を含めてください:\n"
-    "\n"
-    "```tool_call\n"
-    '{"tool": "rewrite_self", "new_code": "...新しいapp.pyの全内容..."}\n'
-    "```\n"
-    "\n"
-    "### rewrite_self\n"
-    "自分自身のソースコード(app.py)を書き換えます。\n"
-    "- new_code: 新しいapp.pyの完全なソースコード\n"
-    "- 書き換え後、サーバーは自動的に再起動されます\n"
-    "- 書き換え前の状態は自動的に保存されるので、失敗してもユーザーが元に戻せます\n"
-    "\n"
-    "## 注意事項\n"
-    "- コードを書き換える際は、既存の機能（チャット、ストリーミング、履歴管理、リバート機能）を壊さないよう注意してください\n"
-    "- 新機能の追加や、UIの改善など、建設的な変更のみ行ってください\n"
-    "- ユーザーが明示的に依頼した場合のみコードを書き換えてください\n"
-)
+# --- プラグインシステム ---
+def _load_plugins() -> dict:
+    """plugins/ 以下の全JSONを読み込む"""
+    plugins = {}
+    for f in sorted(PLUGINS_DIR.glob("*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                p = json.load(fh)
+            p.setdefault("enabled", True)
+            plugins[p["name"]] = p
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return plugins
 
+
+def _save_plugin(plugin: dict):
+    """プラグインをJSONファイルとして保存"""
+    path = PLUGINS_DIR / f"{plugin['name']}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(plugin, f, ensure_ascii=False, indent=2)
+
+
+def _delete_plugin(name: str) -> bool:
+    path = PLUGINS_DIR / f"{name}.json"
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def _run_plugin(name: str, args: dict) -> str:
+    """プラグインのコードを実行する"""
+    plugins = _load_plugins()
+    if name not in plugins:
+        return f"エラー: プラグイン '{name}' が見つかりません"
+    plugin = plugins[name]
+    if not plugin.get("enabled", True):
+        return f"エラー: プラグイン '{name}' は無効化されています"
+    code = plugin.get("code", "")
+    if not code:
+        return f"エラー: プラグイン '{name}' にコードがありません"
+    try:
+        local_ns = {}
+        exec(code, {"__builtins__": __builtins__}, local_ns)
+        if "run" not in local_ns:
+            return "エラー: プラグインに run(args) 関数が定義されていません"
+        result = local_ns["run"](args)
+        return str(result)
+    except Exception as e:
+        return f"プラグイン実行エラー: {e}\n{traceback.format_exc()}"
+
+
+# --- システムプロンプト（動的生成） ---
+def _build_system_prompt() -> str:
+    plugins = _load_plugins()
+    enabled = {k: v for k, v in plugins.items() if v.get("enabled", True)}
+
+    plugin_list = ""
+    if enabled:
+        plugin_list = "\n### 利用可能なプラグイン\n"
+        for name, p in enabled.items():
+            plugin_list += f"- **{name}**: {p.get('description', '説明なし')}\n"
+        plugin_list += (
+            "\nプラグインを使うには:\n"
+            "```tool_call\n"
+            '{"tool": "use_plugin", "plugin": "プラグイン名", "args": {"key": "value"}}\n'
+            "```\n"
+        )
+
+    return (
+        f'あなたは「{CONFIG["agent_name"]}」({CONFIG["agent_name_en"]})、自己進化するAIアシスタントです。\n'
+        f'性格: {CONFIG.get("personality", "知的で親切なアシスタント")}\n'
+        "ユーザーとの会話に応答し、自分自身の機能を改善できます。\n"
+        "\n"
+        "## 重要なルール\n"
+        "**ツールを使用する際は、必ず事前にどのツールを使うか宣言してください。**\n"
+        "例: 「rewrite_self ツールを使ってコードを書き換えます」\n"
+        "例: 「create_plugin ツールで新しいプラグインを作成します」\n"
+        "例: 「use_plugin ツールで calculator プラグインを実行します」\n"
+        "宣言なしにツールを使わないでください。\n"
+        "\n"
+        "## 組み込みツール\n"
+        "ツールを使う場合は、応答の中に以下のJSON形式を含めてください:\n"
+        "\n"
+        "### rewrite_self — 自分自身のソースコードを書き換え\n"
+        "```tool_call\n"
+        '{"tool": "rewrite_self", "new_code": "...新しいapp.pyの全内容..."}\n'
+        "```\n"
+        "\n"
+        "### create_plugin — 新しいプラグインを作成\n"
+        "会話の中でユーザーが新しい機能を求めた場合、プラグインとして追加できます。\n"
+        "```tool_call\n"
+        '{"tool": "create_plugin", "name": "英数字の名前", "description": "説明", '
+        '"code": "def run(args):\\n    return str(result)"}\n'
+        "```\n"
+        "- code には必ず `def run(args):` 関数を定義してください\n"
+        "- args は辞書型で、プラグイン呼び出し時に渡されます\n"
+        "- run() の戻り値が結果として表示されます\n"
+        "\n"
+        "### use_plugin — プラグインを実行\n"
+        "```tool_call\n"
+        '{"tool": "use_plugin", "plugin": "プラグイン名", "args": {"key": "value"}}\n'
+        "```\n"
+        + plugin_list
+        + "\n"
+        "## 注意事項\n"
+        "- rewrite_self は既存の機能を壊さないよう注意してください\n"
+        "- ユーザーが明示的に依頼した場合のみツールを使ってください\n"
+    )
+
+
+# --- HTML生成 ---
 def _build_html():
     c = CONFIG["colors"]
     name = CONFIG["agent_name"]
@@ -125,6 +217,8 @@ body {{
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
 }}
 #header h1 {{
     font-size: 1.2em;
@@ -132,7 +226,7 @@ body {{
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }}
-.header-buttons {{ display: flex; gap: 8px; }}
+.header-buttons {{ display: flex; gap: 8px; flex-wrap: wrap; }}
 .header-buttons button {{
     padding: 6px 14px;
     border: 1px solid {c['accent']}40;
@@ -182,7 +276,6 @@ body {{
     background: {c['assistant_msg_bg']};
     border: 1px solid {c['assistant_msg_border']};
 }}
-/* Markdown styles */
 .message.assistant p {{ margin: 0.4em 0; }}
 .message.assistant p:first-child {{ margin-top: 0; }}
 .message.assistant p:last-child {{ margin-bottom: 0; }}
@@ -223,13 +316,10 @@ body {{
     border: 1px solid {c['assistant_msg_border']};
     padding: 6px 10px;
 }}
-.message.assistant th {{
-    background: {c['bg']}80;
-}}
+.message.assistant th {{ background: {c['bg']}80; }}
 .message.assistant h1, .message.assistant h2, .message.assistant h3,
 .message.assistant h4, .message.assistant h5, .message.assistant h6 {{
-    margin: 0.6em 0 0.3em;
-    line-height: 1.3;
+    margin: 0.6em 0 0.3em; line-height: 1.3;
 }}
 .message.assistant h1 {{ font-size: 1.3em; }}
 .message.assistant h2 {{ font-size: 1.15em; }}
@@ -239,13 +329,8 @@ body {{
     border-top: 1px solid {c['assistant_msg_border']};
     margin: 0.8em 0;
 }}
-.message.assistant a {{
-    color: {c['accent']};
-    text-decoration: none;
-}}
-.message.assistant a:hover {{
-    text-decoration: underline;
-}}
+.message.assistant a {{ color: {c['accent']}; text-decoration: none; }}
+.message.assistant a:hover {{ text-decoration: underline; }}
 .message.system {{
     align-self: center;
     background: {c['system_msg_bg']};
@@ -253,6 +338,16 @@ body {{
     font-size: 0.85em;
     color: {c['system_msg_text']};
     text-align: center;
+}}
+.message.tool-use {{
+    align-self: flex-start;
+    background: {c['system_msg_bg']};
+    border: 1px solid {c['accent']}40;
+    font-size: 0.85em;
+    color: {c['accent']};
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-family: monospace;
 }}
 #input-area {{
     padding: 16px 20px;
@@ -294,7 +389,7 @@ body {{
     padding: 4px 20px;
     background: {c['bg_secondary']};
 }}
-/* Modal */
+/* Modal shared */
 .modal-overlay {{
     display: none;
     position: fixed;
@@ -310,30 +405,43 @@ body {{
     border: 1px solid {c['assistant_msg_border']};
     border-radius: 12px;
     padding: 24px;
-    max-width: 500px;
+    max-width: 600px;
     width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
 }}
 .modal h2 {{ margin-bottom: 16px; font-size: 1.1em; }}
-.modal .history-list {{
-    max-height: 300px;
+.modal .list-area {{
+    flex: 1;
     overflow-y: auto;
     margin-bottom: 16px;
 }}
-.modal .history-item {{
+.modal .item-row {{
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 12px;
+    padding: 10px 12px;
     border-bottom: 1px solid {c['assistant_msg_border']};
+    gap: 8px;
 }}
-.modal .history-item button {{
-    padding: 4px 12px;
-    background: {c['accent']}20;
-    border: 1px solid {c['accent']};
+.modal .item-row .item-info {{ flex: 1; }}
+.modal .item-row .item-name {{ font-weight: bold; font-size: 0.95em; }}
+.modal .item-row .item-desc {{ font-size: 0.8em; color: {c['text_secondary']}; margin-top: 2px; }}
+.modal .item-row .item-actions {{ display: flex; gap: 6px; align-items: center; }}
+.modal .item-row button {{
+    padding: 4px 10px;
     border-radius: 4px;
-    color: {c['accent']};
     cursor: pointer;
-    font-size: 0.85em;
+    font-size: 0.8em;
+    border: 1px solid {c['accent']};
+    background: {c['accent']}20;
+    color: {c['accent']};
+}}
+.modal .item-row button.del {{
+    border-color: #ff453a;
+    background: #ff453a20;
+    color: #ff453a;
 }}
 .modal .close-btn {{
     width: 100%;
@@ -344,15 +452,53 @@ body {{
     color: {c['text']};
     cursor: pointer;
 }}
+/* Toggle switch */
+.toggle {{
+    position: relative;
+    width: 40px;
+    height: 22px;
+    display: inline-block;
+}}
+.toggle input {{ opacity: 0; width: 0; height: 0; }}
+.toggle .slider {{
+    position: absolute;
+    inset: 0;
+    background: {c['assistant_msg_border']};
+    border-radius: 22px;
+    cursor: pointer;
+    transition: 0.2s;
+}}
+.toggle .slider::before {{
+    content: "";
+    position: absolute;
+    width: 16px; height: 16px;
+    left: 3px; bottom: 3px;
+    background: {c['text']};
+    border-radius: 50%;
+    transition: 0.2s;
+}}
+.toggle input:checked + .slider {{
+    background: {c['accent']};
+}}
+.toggle input:checked + .slider::before {{
+    transform: translateX(18px);
+}}
+.empty-msg {{
+    padding: 20px;
+    text-align: center;
+    color: {c['text_secondary']};
+    font-size: 0.9em;
+}}
 </style>
 </head>
 <body>
 <div id="header">
     <h1>{name} {name_en} Agent</h1>
     <div class="header-buttons">
-        <button onclick="showHistory()">履歴から復元</button>
-        <button onclick="revertPrev()">前の状態に戻す</button>
-        <button class="danger" onclick="revertInitial()">初期状態に戻す</button>
+        <button onclick="showPlugins()">Plugins</button>
+        <button onclick="showHistory()">履歴</button>
+        <button onclick="revertPrev()">前に戻す</button>
+        <button class="danger" onclick="revertInitial()">初期化</button>
     </div>
 </div>
 <div id="chat"></div>
@@ -363,11 +509,21 @@ body {{
     <button id="send-btn" onclick="send()">送信</button>
 </div>
 
+<!-- History Modal -->
 <div class="modal-overlay" id="history-modal">
     <div class="modal">
         <h2>コード履歴</h2>
-        <div class="history-list" id="history-list"></div>
-        <button class="close-btn" onclick="closeHistory()">閉じる</button>
+        <div class="list-area" id="history-list"></div>
+        <button class="close-btn" onclick="closeModal('history-modal')">閉じる</button>
+    </div>
+</div>
+
+<!-- Plugins Modal -->
+<div class="modal-overlay" id="plugins-modal">
+    <div class="modal">
+        <h2>Plugins</h2>
+        <div class="list-area" id="plugins-list"></div>
+        <button class="close-btn" onclick="closeModal('plugins-modal')">閉じる</button>
     </div>
 </div>
 
@@ -378,7 +534,6 @@ const sendBtn = document.getElementById("send-btn");
 let messages = [];
 let isComposing = false;
 
-// marked.js 設定
 marked.setOptions({{
     breaks: true,
     gfm: true,
@@ -401,7 +556,6 @@ function handleKeyDown(e) {{
     }}
 }}
 
-// モデル名を取得
 fetch("/api/model").then(r=>r.json()).then(d=>{{
     document.getElementById("model-name").textContent = d.model;
 }});
@@ -440,6 +594,7 @@ async function send() {{
     const text = msgInput.value.trim();
     if (!text) return;
     msgInput.value = "";
+    msgInput.style.height = "auto";
     sendBtn.disabled = true;
 
     addMessage("user", text);
@@ -471,16 +626,18 @@ async function send() {{
                         fullText += j.content;
                         scheduleRender(assistantDiv, fullText);
                     }}
-                    if (j.tool_executed) {{
-                        addMessage("system", "コードを書き換えました。ページをリロードしてください。");
+                    if (j.tool_call) {{
+                        addMessage("tool-use", j.tool_call);
+                    }}
+                    if (j.tool_result) {{
+                        addMessage("system", j.tool_result);
                     }}
                     if (j.tool_error) {{
-                        addMessage("system", "コード書き換えエラー: " + j.tool_error);
+                        addMessage("system", "Error: " + j.tool_error);
                     }}
                 }} catch(e) {{}}
             }}
         }}
-        // 最終レンダリング
         if (renderTimer) {{ clearTimeout(renderTimer); renderTimer = null; }}
         assistantDiv.innerHTML = renderMarkdown(fullText);
         assistantDiv.querySelectorAll("pre code:not(.hljs)").forEach(el => {{
@@ -489,14 +646,37 @@ async function send() {{
         chat.scrollTop = chat.scrollHeight;
         messages.push({{role: "assistant", content: fullText}});
     }} catch(e) {{
-        assistantDiv.textContent = "エラー: " + e.message;
+        assistantDiv.textContent = "Error: " + e.message;
     }}
     sendBtn.disabled = false;
     msgInput.focus();
 }}
 
+function closeModal(id) {{
+    document.getElementById(id).classList.remove("active");
+}}
+
+// --- History ---
+async function showHistory() {{
+    const r = await fetch("/api/history");
+    const d = await r.json();
+    const list = document.getElementById("history-list");
+    list.innerHTML = "";
+    if (d.versions.length === 0) {{
+        list.innerHTML = '<div class="empty-msg">履歴がありません</div>';
+    }}
+    for (const v of d.versions) {{
+        const item = document.createElement("div");
+        item.className = "item-row";
+        item.innerHTML = `<div class="item-info"><div class="item-name">${{v.name}}</div><div class="item-desc">${{v.time}}</div></div>
+            <div class="item-actions"><button onclick="revertTo('${{v.name}}')">復元</button></div>`;
+        list.appendChild(item);
+    }}
+    document.getElementById("history-modal").classList.add("active");
+}}
+
 async function revertInitial() {{
-    if (!confirm("初期状態に戻しますか？サーバーが再起動されます。")) return;
+    if (!confirm("初期状態に戻しますか？")) return;
     const r = await fetch("/api/revert/initial", {{method:"POST"}});
     const d = await r.json();
     addMessage("system", d.message);
@@ -508,37 +688,58 @@ async function revertPrev() {{
     addMessage("system", d.message);
 }}
 
-async function showHistory() {{
-    const r = await fetch("/api/history");
-    const d = await r.json();
-    const list = document.getElementById("history-list");
-    list.innerHTML = "";
-    if (d.versions.length === 0) {{
-        list.innerHTML = "<p style='padding:12px;color:{c['text_secondary']}'>履歴がありません</p>";
-    }}
-    for (const v of d.versions) {{
-        const item = document.createElement("div");
-        item.className = "history-item";
-        item.innerHTML = `<span>${{v.name}} (${{v.time}})</span>
-            <button onclick="revertTo('${{v.name}}')">復元</button>`;
-        list.appendChild(item);
-    }}
-    document.getElementById("history-modal").classList.add("active");
-}}
-
-function closeHistory() {{
-    document.getElementById("history-modal").classList.remove("active");
-}}
-
 async function revertTo(name) {{
     if (!confirm(name + " に復元しますか？")) return;
     const r = await fetch("/api/revert/" + encodeURIComponent(name), {{method:"POST"}});
     const d = await r.json();
-    closeHistory();
+    closeModal("history-modal");
     addMessage("system", d.message);
 }}
 
-// auto-resize textarea
+// --- Plugins ---
+async function showPlugins() {{
+    const r = await fetch("/api/plugins");
+    const d = await r.json();
+    const list = document.getElementById("plugins-list");
+    list.innerHTML = "";
+    if (d.plugins.length === 0) {{
+        list.innerHTML = '<div class="empty-msg">プラグインがありません。<br>チャットで「〜するプラグインを作って」と依頼してください。</div>';
+    }}
+    for (const p of d.plugins) {{
+        const item = document.createElement("div");
+        item.className = "item-row";
+        const checked = p.enabled ? "checked" : "";
+        item.innerHTML = `
+            <div class="item-info">
+                <div class="item-name">${{p.name}}</div>
+                <div class="item-desc">${{p.description || "説明なし"}}</div>
+            </div>
+            <div class="item-actions">
+                <label class="toggle">
+                    <input type="checkbox" ${{checked}} onchange="togglePlugin('${{p.name}}', this.checked)">
+                    <span class="slider"></span>
+                </label>
+                <button class="del" onclick="deletePlugin('${{p.name}}')">削除</button>
+            </div>`;
+        list.appendChild(item);
+    }}
+    document.getElementById("plugins-modal").classList.add("active");
+}}
+
+async function togglePlugin(name, enabled) {{
+    await fetch("/api/plugins/" + encodeURIComponent(name) + "/toggle", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{enabled: enabled}})
+    }});
+}}
+
+async function deletePlugin(name) {{
+    if (!confirm("プラグイン '" + name + "' を削除しますか？")) return;
+    await fetch("/api/plugins/" + encodeURIComponent(name), {{method: "DELETE"}});
+    showPlugins();
+}}
+
 msgInput.addEventListener("input", function() {{
     this.style.height = "auto";
     this.style.height = Math.min(this.scrollHeight, 200) + "px";
@@ -548,9 +749,11 @@ msgInput.addEventListener("input", function() {{
 </html>
 """
 
+
 HTML_PAGE = _build_html()
 
 
+# --- API エンドポイント ---
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTML_PAGE
@@ -566,6 +769,32 @@ async def get_config():
     return CONFIG
 
 
+# --- Plugins API ---
+@app.get("/api/plugins")
+async def list_plugins():
+    plugins = _load_plugins()
+    return {"plugins": list(plugins.values())}
+
+
+@app.post("/api/plugins/{name}/toggle")
+async def toggle_plugin(name: str, request: Request):
+    body = await request.json()
+    plugins = _load_plugins()
+    if name not in plugins:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    plugins[name]["enabled"] = body.get("enabled", True)
+    _save_plugin(plugins[name])
+    return {"ok": True}
+
+
+@app.delete("/api/plugins/{name}")
+async def delete_plugin_endpoint(name: str):
+    if _delete_plugin(name):
+        return {"ok": True}
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
+# --- History API ---
 @app.get("/api/history")
 async def get_history():
     versions = []
@@ -580,7 +809,6 @@ async def get_history():
 
 
 def _save_backup():
-    """現在のapp.pyをバックアップとして保存"""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup = HISTORY_DIR / f"app.py.{ts}"
     shutil.copy2(APP_FILE, backup)
@@ -588,14 +816,12 @@ def _save_backup():
 
 
 def _do_rewrite(new_code: str) -> str:
-    """app.pyを新しいコードで書き換える"""
     _save_backup()
     APP_FILE.write_text(new_code, encoding="utf-8")
     return "コード書き換え完了。サーバーを再起動してください。"
 
 
 def _do_revert(source: Path) -> str:
-    """指定されたバックアップからapp.pyを復元する"""
     if not source.exists():
         return "バックアップが見つかりません"
     _save_backup()
@@ -631,11 +857,8 @@ async def revert_to(name: str):
 
 
 def _restart_server():
-    """バックグラウンドでサーバーを再起動する"""
     import subprocess
     import sys
-    # uvicorn を再起動するため、現プロセスを置き換える
-    # 少し遅延させてレスポンスを返してから再起動
     subprocess.Popen(
         [sys.executable, "-c",
          "import time,os,signal; time.sleep(1); "
@@ -643,13 +866,69 @@ def _restart_server():
     )
 
 
+# --- Chat API ---
+def _process_tool_calls(full_response: str):
+    """レスポンスから全tool_callブロックを抽出して実行"""
+    results = []
+    search_from = 0
+    while True:
+        marker = "```tool_call"
+        start = full_response.find(marker, search_from)
+        if start == -1:
+            break
+        start += len(marker)
+        end = full_response.find("```", start)
+        if end == -1:
+            break
+        tc_json = full_response[start:end].strip()
+        search_from = end + 3
+        try:
+            tc = json.loads(tc_json)
+        except json.JSONDecodeError as e:
+            results.append({"error": f"JSONパースエラー: {e}"})
+            continue
+
+        tool = tc.get("tool", "")
+        if tool == "rewrite_self":
+            new_code = tc.get("new_code", "")
+            if new_code:
+                msg = _do_rewrite(new_code)
+                results.append({"call": f"rewrite_self", "result": msg, "restart": True})
+            else:
+                results.append({"error": "rewrite_self: new_code が空です"})
+
+        elif tool == "create_plugin":
+            pname = tc.get("name", "")
+            pdesc = tc.get("description", "")
+            pcode = tc.get("code", "")
+            if not pname or not pcode:
+                results.append({"error": "create_plugin: name と code は必須です"})
+            else:
+                plugin = {"name": pname, "description": pdesc, "code": pcode, "enabled": True}
+                _save_plugin(plugin)
+                results.append({"call": f"create_plugin: {pname}", "result": f"プラグイン '{pname}' を作成しました"})
+
+        elif tool == "use_plugin":
+            pname = tc.get("plugin", "")
+            pargs = tc.get("args", {})
+            if not pname:
+                results.append({"error": "use_plugin: plugin 名が必要です"})
+            else:
+                result = _run_plugin(pname, pargs)
+                results.append({"call": f"use_plugin: {pname}", "result": result})
+
+        else:
+            results.append({"error": f"不明なツール: {tool}"})
+
+    return results
+
+
 @app.post("/api/chat")
 async def chat_endpoint(request: Request):
     body = await request.json()
     user_messages = body.get("messages", [])
-
-    # システムプロンプトを先頭に追加
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + user_messages
+    system_prompt = _build_system_prompt()
+    messages = [{"role": "system", "content": system_prompt}] + user_messages
 
     async def stream():
         full_response = ""
@@ -672,19 +951,20 @@ async def chat_endpoint(request: Request):
                         except json.JSONDecodeError:
                             continue
 
-            # レスポンス完了後、ツールコールをチェック
+            # ツールコール処理
             if "```tool_call" in full_response:
-                try:
-                    tc_start = full_response.index("```tool_call") + len("```tool_call")
-                    tc_end = full_response.index("```", tc_start)
-                    tc_json = full_response[tc_start:tc_end].strip()
-                    tc = json.loads(tc_json)
-                    if tc.get("tool") == "rewrite_self" and tc.get("new_code"):
-                        result = _do_rewrite(tc["new_code"])
-                        yield f"data: {json.dumps({'tool_executed': True, 'result': result})}\n\n"
-                        _restart_server()
-                except (ValueError, json.JSONDecodeError, KeyError) as e:
-                    yield f"data: {json.dumps({'tool_error': str(e)})}\n\n"
+                results = _process_tool_calls(full_response)
+                need_restart = False
+                for r in results:
+                    if "call" in r:
+                        yield f"data: {json.dumps({'tool_call': r['call']})}\n\n"
+                        yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
+                        if r.get("restart"):
+                            need_restart = True
+                    if "error" in r:
+                        yield f"data: {json.dumps({'tool_error': r['error']})}\n\n"
+                if need_restart:
+                    _restart_server()
 
             yield "data: [DONE]\n\n"
         except httpx.ConnectError:
