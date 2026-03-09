@@ -49,6 +49,32 @@ def _web_search(query: str, max_results: int = 5) -> str:
         return f"Search error: {e}"
 
 
+# --- Python Runner ---
+def _python_run(code: str, timeout: int = 30) -> str:
+    """Execute Python code in a subprocess and return stdout/stderr."""
+    try:
+        result = subprocess.run(
+            ["python3", "-c", code],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(APP_FILE.parent),
+        )
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            output += ("\n" if output else "") + result.stderr
+        if not output:
+            output = "(no output)"
+        # Truncate very long output
+        if len(output) > 5000:
+            output = output[:5000] + "\n... (truncated)"
+        return output
+    except subprocess.TimeoutExpired:
+        return f"Error: execution timed out after {timeout}s"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # --- Config ---
 DEFAULT_STRINGS = {
     "plugins": "Plugins",
@@ -295,6 +321,15 @@ def _build_system_prompt() -> str:
         "```tool_call\n"
         '{"tool": "web_search", "query": "search query here", "max_results": 5}\n'
         "```\n"
+        "\n"
+        "### python_run — Execute Python code\n"
+        "Run Python code and return the output. Use this for calculations, data processing, file operations, etc.\n"
+        "```tool_call\n"
+        '{"tool": "python_run", "code": "print(2 + 2)", "timeout": 30}\n'
+        "```\n"
+        "- The code runs in a subprocess with python3\n"
+        "- Output (stdout + stderr) is returned\n"
+        "- Default timeout is 30 seconds\n"
         "\n"
         "### rewrite_self — Rewrite your own source code\n"
         "```tool_call\n"
@@ -1069,6 +1104,15 @@ def _process_tool_calls(full_response: str):
                 search_result = _web_search(query, max_results=max_results)
                 results.append({"call": f"web_search: {query}", "result": search_result})
 
+        elif tool == "python_run":
+            code = tc.get("code", "")
+            timeout = tc.get("timeout", 30)
+            if not code:
+                results.append({"error": "python_run: code is required"})
+            else:
+                run_result = _python_run(code, timeout=timeout)
+                results.append({"call": f"python_run", "result": run_result})
+
         elif tool == "rewrite_self":
             new_code = tc.get("new_code", "")
             if new_code:
@@ -1136,24 +1180,28 @@ async def chat_endpoint(request: Request):
             if "```tool_call" in full_response:
                 results = _process_tool_calls(full_response)
                 need_restart = False
-                search_results = []
+                tool_outputs = []  # Collect results that need LLM follow-up
                 for r in results:
                     if "call" in r:
                         yield f"data: {json.dumps({'tool_call': r['call']})}\n\n"
                         yield f"data: {json.dumps({'tool_result': r['result']})}\n\n"
-                        if r["call"].startswith("web_search:"):
-                            search_results.append(r["result"])
+                        # web_search and python_run results need LLM follow-up
+                        call_name = r["call"]
+                        if call_name.startswith("web_search:") or call_name == "python_run":
+                            tool_outputs.append({"tool": call_name, "output": r["result"]})
                         if r.get("restart"):
                             need_restart = True
                     if "error" in r:
                         yield f"data: {json.dumps({'tool_error': r['error']})}\n\n"
 
-                # If we got web search results, feed them back to the LLM
-                if search_results:
-                    search_context = "\n\n---\n\n".join(search_results)
+                # Feed tool outputs back to the LLM for a synthesized response
+                if tool_outputs:
+                    tool_context = "\n\n---\n\n".join(
+                        f"[{t['tool']}]\n{t['output']}" for t in tool_outputs
+                    )
                     followup_messages = messages + [
                         {"role": "assistant", "content": full_response},
-                        {"role": "user", "content": f"Here are the web search results. Based on these results, provide an accurate answer to the user's original question.\n\n{search_context}"},
+                        {"role": "user", "content": f"Here are the tool execution results. Based on these results, provide an accurate and helpful answer to the user's original question.\n\n{tool_context}"},
                     ]
                     # Signal frontend to start a new assistant message
                     yield f"data: {json.dumps({'new_assistant': True})}\n\n"
