@@ -965,7 +965,17 @@ async function send() {{
                 if (data === "[DONE]") continue;
                 try {{
                     const j = JSON.parse(data);
+                    if (j.status) {{
+                        const statusDiv = document.createElement("div");
+                        statusDiv.className = "message tool-use";
+                        statusDiv.innerHTML = '<span class="tool-icon"></span>' + j.status;
+                        statusDiv.id = "status-msg";
+                        chat.appendChild(statusDiv);
+                        chat.scrollTop = chat.scrollHeight;
+                    }}
                     if (j.new_assistant) {{
+                        const oldStatus = document.getElementById("status-msg");
+                        if (oldStatus) {{ oldStatus.classList.add("done"); oldStatus.removeAttribute("id"); }}
                         assistantDiv = addMessage("assistant", "");
                         fullText = "";
                     }}
@@ -998,6 +1008,8 @@ async function send() {{
                         thinkingDiv = null;
                     }}
                     if (j.content) {{
+                        const oldStatus = document.getElementById("status-msg");
+                        if (oldStatus) {{ oldStatus.classList.add("done"); oldStatus.removeAttribute("id"); }}
                         fullText += j.content;
                         scheduleRender(assistantDiv, fullText);
                     }}
@@ -1426,6 +1438,7 @@ async def chat_endpoint(request: Request):
             if not full_response.strip() and full_thinking.strip():
                 if is_thinking:
                     yield f"data: {json.dumps({'thinking_end': True})}\n\n"
+                yield f"data: {json.dumps({'status': 'Generating tool calls...'})}\n\n"
                 # Use a smaller, focused prompt to extract tool calls from thinking
                 extract_messages = [
                     {"role": "system", "content": (
