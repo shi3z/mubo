@@ -26,6 +26,8 @@ PLUGINS_DIR = APP_FILE.parent / "plugins"
 CONFIG_FILE = APP_FILE.parent / "config.json"
 
 PLUGINS_DIR.mkdir(exist_ok=True)
+WORKSPACE_DIR = Path.home() / "mubo_workspace"
+WORKSPACE_DIR.mkdir(exist_ok=True)
 
 # --- Web Search ---
 def _web_search(query: str, max_results: int = 5) -> str:
@@ -114,10 +116,12 @@ def _list_files(path: str = ".", pattern: str = "*") -> str:
 def _python_run(code: str, timeout: int = 30) -> str:
     """Execute Python code in a subprocess and return stdout/stderr."""
     try:
+        # Track existing image files before execution
+        existing_images = set(WORKSPACE_DIR.glob("*.png")) | set(WORKSPACE_DIR.glob("*.jpg")) | set(WORKSPACE_DIR.glob("*.svg"))
         result = subprocess.run(
             ["python3", "-c", code],
             capture_output=True, text=True, timeout=timeout,
-            cwd=str(APP_FILE.parent),
+            cwd=str(WORKSPACE_DIR),
         )
         output = ""
         if result.stdout:
@@ -129,6 +133,12 @@ def _python_run(code: str, timeout: int = 30) -> str:
         # Truncate very long output
         if len(output) > 5000:
             output = output[:5000] + "\n... (truncated)"
+        # Detect newly created image files
+        new_images = (set(WORKSPACE_DIR.glob("*.png")) | set(WORKSPACE_DIR.glob("*.jpg")) | set(WORKSPACE_DIR.glob("*.svg"))) - existing_images
+        if new_images:
+            output += "\n\n__IMAGES__:"
+            for img in sorted(new_images):
+                output += f"\n/workspace/{img.name}"
         return output
     except subprocess.TimeoutExpired:
         return f"Error: execution timed out after {timeout}s"
@@ -393,7 +403,10 @@ def _build_system_prompt() -> str:
         "```\n"
         "\n"
         "### python_run — Execute Python code\n"
-        "Run Python code and return the output. Use this for calculations, data processing, etc.\n"
+        "Run Python code and return the output. Use this for calculations, data processing, image generation, etc.\n"
+        "The working directory is ~/mubo_workspace/. matplotlib and numpy are available.\n"
+        "To generate and display images, save them as PNG files (e.g., plt.savefig('output.png', dpi=150, bbox_inches='tight')).\n"
+        "Generated images are automatically detected and displayed inline.\n"
         "```tool_call\n"
         '{"tool": "python_run", "code": "print(2 + 2)", "timeout": 30}\n'
         "```\n"
@@ -1004,7 +1017,32 @@ async function send() {{
                         }}
                         const resultDiv = document.createElement("div");
                         resultDiv.className = "message tool-result";
-                        resultDiv.textContent = j.tool_result;
+                        // Check for image markers in tool result
+                        const imgMarker = "__IMAGES__:";
+                        const imgIdx = j.tool_result.indexOf(imgMarker);
+                        if (imgIdx >= 0) {{
+                            const textPart = j.tool_result.substring(0, imgIdx).trim();
+                            const imgPart = j.tool_result.substring(imgIdx + imgMarker.length).trim();
+                            if (textPart) {{
+                                const textNode = document.createElement("div");
+                                textNode.textContent = textPart;
+                                resultDiv.appendChild(textNode);
+                            }}
+                            for (const line of imgPart.split("\\n")) {{
+                                const imgPath = line.trim();
+                                if (imgPath) {{
+                                    const img = document.createElement("img");
+                                    img.src = imgPath;
+                                    img.style.maxWidth = "100%";
+                                    img.style.borderRadius = "8px";
+                                    img.style.marginTop = "8px";
+                                    resultDiv.appendChild(img);
+                                }}
+                            }}
+                            resultDiv.style.maxHeight = "none";
+                        }} else {{
+                            resultDiv.textContent = j.tool_result;
+                        }}
                         chat.appendChild(resultDiv);
                         chat.scrollTop = chat.scrollHeight;
                     }}
@@ -1144,6 +1182,25 @@ HTML_PAGE = _build_html()
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTML_PAGE
+
+
+@app.get("/workspace/{filename:path}")
+async def serve_workspace_file(filename: str):
+    """Serve files from the workspace directory."""
+    from fastapi.responses import FileResponse
+    fpath = WORKSPACE_DIR / filename
+    if not fpath.exists() or not fpath.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # Determine content type
+    suffix = fpath.suffix.lower()
+    content_types = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml", ".gif": "image/gif",
+        ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+        ".html": "text/html", ".pdf": "application/pdf",
+    }
+    ct = content_types.get(suffix, "application/octet-stream")
+    return FileResponse(str(fpath), media_type=ct)
 
 
 @app.get("/api/model")
