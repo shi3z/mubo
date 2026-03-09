@@ -821,6 +821,18 @@ print_summary() {
 # ============================================================
 # メイン実行
 # ============================================================
+ensure_repo() {
+    # curl | bash で実行された場合、リポジトリをcloneして再実行
+    if [[ ! -f "$(dirname "$0")/agent/app.py" ]] && [[ ! -f "./agent/app.py" ]]; then
+        info "リポジトリが見つかりません。cloneします..."
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        git clone --depth 1 https://github.com/shi3z/mubo.git "$tmpdir/mubo"
+        cd "$tmpdir/mubo"
+        exec bash ./setup.sh "$@"
+    fi
+}
+
 main() {
     echo ""
     printf "${BOLD}${CYAN}"
@@ -833,6 +845,7 @@ main() {
     echo "  無貌 — Local LLM Bootstrapper"
     echo ""
 
+    ensure_repo "$@"
     detect_environment
     setup_ollama
     pull_model
