@@ -1,11 +1,13 @@
 """
 Mubo Agent — 自己書き換え可能なエージェンティックAI
 プラグインシステムを備え、会話を通じてツールを自動的に増やせる。
+バージョン管理はgitで行い、いつでも任意の状態に戻れる。
 """
 
 import json
 import os
 import shutil
+import subprocess
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -19,16 +21,11 @@ app = FastAPI()
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 MODEL = os.environ.get("MUBO_MODEL", "gpt-oss:20b-long")
 APP_FILE = Path(__file__).resolve()
-HISTORY_DIR = APP_FILE.parent / "history"
-INITIAL_BACKUP = HISTORY_DIR / "app.py.initial"
-CONFIG_FILE = APP_FILE.parent / "config.json"
+REPO_DIR = APP_FILE.parent.parent  # gitリポジトリのルート
 PLUGINS_DIR = APP_FILE.parent / "plugins"
+CONFIG_FILE = APP_FILE.parent / "config.json"
 
-# ディレクトリ作成
-HISTORY_DIR.mkdir(exist_ok=True)
 PLUGINS_DIR.mkdir(exist_ok=True)
-if not INITIAL_BACKUP.exists():
-    shutil.copy2(APP_FILE, INITIAL_BACKUP)
 
 # --- 設定読み込み ---
 DEFAULT_CONFIG = {
@@ -74,9 +71,92 @@ def _load_config():
 CONFIG = _load_config()
 
 
+# --- Git操作 ---
+def _git(*args, check=True) -> str:
+    """gitコマンドを実行して出力を返す"""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_DIR)] + list(args),
+            capture_output=True, text=True, timeout=30,
+        )
+        if check and result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
+def _git_commit(message: str):
+    """変更をステージしてコミット"""
+    _git("add", "-A", check=False)
+    _git("commit", "-m", message, "--allow-empty", check=False)
+
+
+def _git_log(max_count: int = 50) -> list[dict]:
+    """コミット履歴を取得"""
+    output = _git("log", f"--max-count={max_count}",
+                   "--format=%H\t%s\t%ai", "--", "agent/app.py")
+    if not output:
+        return []
+    entries = []
+    for line in output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) >= 3:
+            entries.append({
+                "hash": parts[0],
+                "hash_short": parts[0][:8],
+                "message": parts[1],
+                "time": parts[2][:19],
+            })
+    return entries
+
+
+def _git_get_initial_tag() -> str:
+    """マシン固有の初期タグを探す"""
+    output = _git("tag", "-l", "mubo-initial-*")
+    if output:
+        return output.splitlines()[0].strip()
+    return ""
+
+
+def _git_revert_to_commit(commit_hash: str) -> str:
+    """指定コミットのapp.pyに戻す"""
+    # まず現在の状態をコミット
+    _git_commit(f"mubo: auto-save before revert to {commit_hash[:8]}")
+    # そのコミット時点の agent/app.py を取り出す
+    result = _git("show", f"{commit_hash}:agent/app.py", check=False)
+    if not result:
+        return f"コミット {commit_hash[:8]} からapp.pyを取得できません"
+    APP_FILE.write_text(result, encoding="utf-8")
+    _git_commit(f"mubo: revert app.py to {commit_hash[:8]}")
+    return f"{commit_hash[:8]} に復元しました。サーバーを再起動します。"
+
+
+def _git_revert_to_previous() -> str:
+    """1つ前のコミットに戻す"""
+    log = _git_log(max_count=2)
+    if len(log) < 2:
+        return "前の状態がありません"
+    return _git_revert_to_commit(log[1]["hash"])
+
+
+def _git_revert_to_initial() -> str:
+    """初期状態に戻す"""
+    tag = _git_get_initial_tag()
+    if tag:
+        # タグのコミットハッシュを取得
+        commit = _git("rev-list", "-1", tag)
+        if commit:
+            return _git_revert_to_commit(commit)
+    # タグがなければ最初のコミットに戻す
+    first = _git("rev-list", "--max-parents=0", "HEAD")
+    if first:
+        return _git_revert_to_commit(first.splitlines()[0])
+    return "初期コミットが見つかりません"
+
+
 # --- プラグインシステム ---
 def _load_plugins() -> dict:
-    """plugins/ 以下の全JSONを読み込む"""
     plugins = {}
     for f in sorted(PLUGINS_DIR.glob("*.json")):
         try:
@@ -90,22 +170,22 @@ def _load_plugins() -> dict:
 
 
 def _save_plugin(plugin: dict):
-    """プラグインをJSONファイルとして保存"""
     path = PLUGINS_DIR / f"{plugin['name']}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(plugin, f, ensure_ascii=False, indent=2)
+    _git_commit(f"mubo: add plugin '{plugin['name']}'")
 
 
 def _delete_plugin(name: str) -> bool:
     path = PLUGINS_DIR / f"{name}.json"
     if path.exists():
         path.unlink()
+        _git_commit(f"mubo: delete plugin '{name}'")
         return True
     return False
 
 
 def _run_plugin(name: str, args: dict) -> str:
-    """プラグインのコードを実行する"""
     plugins = _load_plugins()
     if name not in plugins:
         return f"エラー: プラグイン '{name}' が見つかりません"
@@ -126,7 +206,7 @@ def _run_plugin(name: str, args: dict) -> str:
         return f"プラグイン実行エラー: {e}\n{traceback.format_exc()}"
 
 
-# --- システムプロンプト（動的生成） ---
+# --- システムプロンプト ---
 def _build_system_prompt() -> str:
     plugins = _load_plugins()
     enabled = {k: v for k, v in plugins.items() if v.get("enabled", True)}
@@ -182,6 +262,7 @@ def _build_system_prompt() -> str:
         "## 注意事項\n"
         "- rewrite_self は既存の機能を壊さないよう注意してください\n"
         "- ユーザーが明示的に依頼した場合のみツールを使ってください\n"
+        "- すべての変更はgitで管理されており、いつでも元に戻せます\n"
     )
 
 
@@ -389,7 +470,6 @@ body {{
     padding: 4px 20px;
     background: {c['bg_secondary']};
 }}
-/* Modal shared */
 .modal-overlay {{
     display: none;
     position: fixed;
@@ -405,7 +485,7 @@ body {{
     border: 1px solid {c['assistant_msg_border']};
     border-radius: 12px;
     padding: 24px;
-    max-width: 600px;
+    max-width: 650px;
     width: 90%;
     max-height: 80vh;
     display: flex;
@@ -425,10 +505,11 @@ body {{
     border-bottom: 1px solid {c['assistant_msg_border']};
     gap: 8px;
 }}
-.modal .item-row .item-info {{ flex: 1; }}
+.modal .item-row .item-info {{ flex: 1; min-width: 0; }}
 .modal .item-row .item-name {{ font-weight: bold; font-size: 0.95em; }}
-.modal .item-row .item-desc {{ font-size: 0.8em; color: {c['text_secondary']}; margin-top: 2px; }}
-.modal .item-row .item-actions {{ display: flex; gap: 6px; align-items: center; }}
+.modal .item-row .item-desc {{ font-size: 0.8em; color: {c['text_secondary']}; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.modal .item-row .item-hash {{ font-size: 0.75em; color: {c['accent']}; font-family: monospace; }}
+.modal .item-row .item-actions {{ display: flex; gap: 6px; align-items: center; flex-shrink: 0; }}
 .modal .item-row button {{
     padding: 4px 10px;
     border-radius: 4px;
@@ -452,7 +533,6 @@ body {{
     color: {c['text']};
     cursor: pointer;
 }}
-/* Toggle switch */
 .toggle {{
     position: relative;
     width: 40px;
@@ -477,12 +557,8 @@ body {{
     border-radius: 50%;
     transition: 0.2s;
 }}
-.toggle input:checked + .slider {{
-    background: {c['accent']};
-}}
-.toggle input:checked + .slider::before {{
-    transform: translateX(18px);
-}}
+.toggle input:checked + .slider {{ background: {c['accent']}; }}
+.toggle input:checked + .slider::before {{ transform: translateX(18px); }}
 .empty-msg {{
     padding: 20px;
     text-align: center;
@@ -512,7 +588,7 @@ body {{
 <!-- History Modal -->
 <div class="modal-overlay" id="history-modal">
     <div class="modal">
-        <h2>コード履歴</h2>
+        <h2>Git 履歴 (agent/app.py)</h2>
         <div class="list-area" id="history-list"></div>
         <button class="close-btn" onclick="closeModal('history-modal')">閉じる</button>
     </div>
@@ -656,20 +732,26 @@ function closeModal(id) {{
     document.getElementById(id).classList.remove("active");
 }}
 
-// --- History ---
+// --- History (git log) ---
 async function showHistory() {{
     const r = await fetch("/api/history");
     const d = await r.json();
     const list = document.getElementById("history-list");
     list.innerHTML = "";
-    if (d.versions.length === 0) {{
+    if (d.commits.length === 0) {{
         list.innerHTML = '<div class="empty-msg">履歴がありません</div>';
     }}
-    for (const v of d.versions) {{
+    for (const c of d.commits) {{
         const item = document.createElement("div");
         item.className = "item-row";
-        item.innerHTML = `<div class="item-info"><div class="item-name">${{v.name}}</div><div class="item-desc">${{v.time}}</div></div>
-            <div class="item-actions"><button onclick="revertTo('${{v.name}}')">復元</button></div>`;
+        item.innerHTML = `
+            <div class="item-info">
+                <div class="item-name">${{c.message}}</div>
+                <div class="item-desc">${{c.time}} <span class="item-hash">${{c.hash_short}}</span></div>
+            </div>
+            <div class="item-actions">
+                <button onclick="revertToCommit('${{c.hash}}')">復元</button>
+            </div>`;
         list.appendChild(item);
     }}
     document.getElementById("history-modal").classList.add("active");
@@ -688,9 +770,9 @@ async function revertPrev() {{
     addMessage("system", d.message);
 }}
 
-async function revertTo(name) {{
-    if (!confirm(name + " に復元しますか？")) return;
-    const r = await fetch("/api/revert/" + encodeURIComponent(name), {{method:"POST"}});
+async function revertToCommit(hash) {{
+    if (!confirm(hash.slice(0,8) + " に復元しますか？")) return;
+    const r = await fetch("/api/revert/" + hash, {{method:"POST"}});
     const d = await r.json();
     closeModal("history-modal");
     addMessage("system", d.message);
@@ -753,7 +835,7 @@ msgInput.addEventListener("input", function() {{
 HTML_PAGE = _build_html()
 
 
-# --- API エンドポイント ---
+# --- API ---
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTML_PAGE
@@ -794,70 +876,38 @@ async def delete_plugin_endpoint(name: str):
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
-# --- History API ---
+# --- History API (git) ---
 @app.get("/api/history")
 async def get_history():
-    versions = []
-    if HISTORY_DIR.exists():
-        for f in sorted(HISTORY_DIR.glob("app.py.*")):
-            stat = f.stat()
-            versions.append({
-                "name": f.name,
-                "time": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-            })
-    return {"versions": versions}
-
-
-def _save_backup():
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = HISTORY_DIR / f"app.py.{ts}"
-    shutil.copy2(APP_FILE, backup)
-    return backup
-
-
-def _do_rewrite(new_code: str) -> str:
-    _save_backup()
-    APP_FILE.write_text(new_code, encoding="utf-8")
-    return "コード書き換え完了。サーバーを再起動してください。"
-
-
-def _do_revert(source: Path) -> str:
-    if not source.exists():
-        return "バックアップが見つかりません"
-    _save_backup()
-    shutil.copy2(source, APP_FILE)
-    return f"{source.name} から復元しました。サーバーを再起動してください。"
+    commits = _git_log(max_count=50)
+    return {"commits": commits}
 
 
 @app.post("/api/revert/initial")
 async def revert_initial():
-    msg = _do_revert(INITIAL_BACKUP)
+    msg = _git_revert_to_initial()
     _restart_server()
     return {"message": msg}
 
 
 @app.post("/api/revert/previous")
 async def revert_previous():
-    backups = sorted(HISTORY_DIR.glob("app.py.[0-9]*"))
-    if not backups:
-        return {"message": "前の状態がありません"}
-    msg = _do_revert(backups[-1])
+    msg = _git_revert_to_previous()
     _restart_server()
     return {"message": msg}
 
 
-@app.post("/api/revert/{name}")
-async def revert_to(name: str):
-    source = HISTORY_DIR / name
-    if not source.exists() or not name.startswith("app.py."):
-        return JSONResponse({"message": "無効なバックアップ名"}, status_code=400)
-    msg = _do_revert(source)
+@app.post("/api/revert/{commit_hash}")
+async def revert_to(commit_hash: str):
+    if len(commit_hash) < 7:
+        return JSONResponse({"message": "無効なコミットハッシュ"}, status_code=400)
+    msg = _git_revert_to_commit(commit_hash)
     _restart_server()
     return {"message": msg}
 
 
 def _restart_server():
-    import subprocess
+    import signal
     import sys
     subprocess.Popen(
         [sys.executable, "-c",
@@ -868,7 +918,6 @@ def _restart_server():
 
 # --- Chat API ---
 def _process_tool_calls(full_response: str):
-    """レスポンスから全tool_callブロックを抽出して実行"""
     results = []
     search_from = 0
     while True:
@@ -892,8 +941,11 @@ def _process_tool_calls(full_response: str):
         if tool == "rewrite_self":
             new_code = tc.get("new_code", "")
             if new_code:
-                msg = _do_rewrite(new_code)
-                results.append({"call": f"rewrite_self", "result": msg, "restart": True})
+                # 書き換え前にコミット
+                _git_commit("mubo: auto-save before rewrite_self")
+                APP_FILE.write_text(new_code, encoding="utf-8")
+                _git_commit("mubo: rewrite_self by agent")
+                results.append({"call": "rewrite_self", "result": "コード書き換え完了。サーバーを再起動します。", "restart": True})
             else:
                 results.append({"error": "rewrite_self: new_code が空です"})
 
@@ -951,7 +1003,6 @@ async def chat_endpoint(request: Request):
                         except json.JSONDecodeError:
                             continue
 
-            # ツールコール処理
             if "```tool_call" in full_response:
                 results = _process_tool_calls(full_response)
                 need_restart = False

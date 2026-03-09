@@ -1,5 +1,4 @@
 agent/config.json
-agent/history/
 agent/plugins/
 agent/.venv/
 __pycache__/

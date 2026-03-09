@@ -946,10 +946,65 @@ ensure_repo() {
         info "リポジトリが見つかりません。cloneします..."
         local tmpdir
         tmpdir=$(mktemp -d)
-        git clone --depth 1 https://github.com/shi3z/mubo.git "$tmpdir/mubo"
+        git clone https://github.com/shi3z/mubo.git "$tmpdir/mubo"
         cd "$tmpdir/mubo"
         exec bash ./setup.sh "$@"
     fi
+}
+
+setup_machine_branch() {
+    # gitリポジトリ内でなければスキップ
+    if ! git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+        return
+    fi
+
+    local repo_dir
+    repo_dir="$(git rev-parse --show-toplevel 2>/dev/null)"
+    if [[ -z "$repo_dir" ]]; then
+        return
+    fi
+
+    # マシン固有のブランチ名を生成
+    local hostname
+    hostname="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo 'unknown')"
+    # ブランチ名に使えない文字を除去
+    hostname="$(echo "$hostname" | tr -c 'a-zA-Z0-9_-' '-')"
+    local branch_name="machine/${hostname}"
+
+    local current_branch
+    current_branch="$(git -C "$repo_dir" branch --show-current 2>/dev/null)"
+
+    # 既にマシンブランチにいればOK
+    if [[ "$current_branch" == "$branch_name" ]]; then
+        ok "マシンブランチ: ${branch_name}"
+        return
+    fi
+
+    # マシンブランチが存在するか
+    if git -C "$repo_dir" show-ref --verify --quiet "refs/heads/${branch_name}" 2>/dev/null; then
+        info "既存のマシンブランチに切り替え: ${branch_name}"
+        git -C "$repo_dir" checkout "$branch_name" --quiet 2>/dev/null
+        # mainの更新をマージ
+        git -C "$repo_dir" merge main --no-edit --quiet 2>/dev/null || true
+    else
+        info "マシンブランチを作成: ${branch_name}"
+        git -C "$repo_dir" checkout -b "$branch_name" --quiet 2>/dev/null
+
+        # gitユーザー設定がなければ仮設定 (コミットに必要)
+        if ! git -C "$repo_dir" config user.name &>/dev/null; then
+            git -C "$repo_dir" config user.name "mubo-agent"
+        fi
+        if ! git -C "$repo_dir" config user.email &>/dev/null; then
+            git -C "$repo_dir" config user.email "mubo@localhost"
+        fi
+
+        # 初期コミット (ベースラインとしてタグを打つ)
+        git -C "$repo_dir" add -A 2>/dev/null || true
+        git -C "$repo_dir" commit --allow-empty -m "mubo: initial state for ${hostname}" --quiet 2>/dev/null || true
+        git -C "$repo_dir" tag -f "mubo-initial-${hostname}" --quiet 2>/dev/null || true
+    fi
+
+    ok "マシンブランチ: ${branch_name}"
 }
 
 main() {
@@ -966,6 +1021,7 @@ main() {
 
     ensure_repo "$@"
     check_for_updates "$@"
+    setup_machine_branch
     detect_environment
     setup_ollama
     pull_model
