@@ -10,6 +10,7 @@ dependencies = [
     "duckduckgo-search>=7.0.0",
     "matplotlib>=3.8.0",
     "numpy>=1.26.0",
+    "ddgs>=9.12.0",
 ]
 
 [tool.uv]

@@ -31,9 +31,9 @@ UNIFIED_MEM=false
 HAS_NPU=false
 NVIDIA_DOCKER_OK=false
 OLLAMA_INSTALLED=false
-BASE_MODEL="nemotron-3-nano:4b"
-DERIVED_MODEL="nemotron-3-nano:4b"
-CTX_LENGTH=262144      # Default 64K
+BASE_MODEL="gpt-oss:20b"
+DERIVED_MODEL="gpt-oss:20b-long"
+CTX_LENGTH=65536      # Default 64K
 
 # ============================================================
 # Phase 1: Environment Detection
@@ -337,10 +337,10 @@ decide_context_length() {
     fi
 
     if (( available_mem >= 64 )); then
-        CTX_LENGTH=262144   # 128K
+        CTX_LENGTH=131072   # 128K
         info "Sufficient memory (${available_mem}GB): setting 128K context"
     elif (( available_mem >= 32 )); then
-        CTX_LENGTH=262144    # 64K
+        CTX_LENGTH=65536    # 64K
         info "Moderate memory (${available_mem}GB): setting 64K context"
     elif (( available_mem >= 16 )); then
         CTX_LENGTH=32768    # 32K
@@ -816,7 +816,7 @@ for dep in d['project']['dependencies']:
     local port="${MUBO_PORT:-8392}"
     info "Starting Mubo Agent (port: ${port})..."
 
-    MUBO_MODEL="${DERIVED_MODEL}" MUBO_PORT="${port}" MUBO_MXFP4="${IS_BLACKWELL}" MUBO_LLAMA_PORT="${LLAMA_SERVER_PORT}" \
+    MUBO_MODEL="${DERIVED_MODEL}" MUBO_PORT="${port}" \
         uv run --project "${agent_dir}" python "${agent_dir}/app.py" &
     local agent_pid=$!
 
@@ -1114,9 +1114,7 @@ main() {
     check_for_updates "$@"
     setup_machine_branch
     detect_environment
-    detect_blackwell
     setup_ollama
-    setup_llama_cpp_mxfp4
     pull_model
     create_extended_model
     setup_extras
@@ -1125,108 +1123,3 @@ main() {
 }
 
 main "$@"
-
-# ============================================================
-# Blackwell GPU + MXFP4 Support
-# ============================================================
-IS_BLACKWELL=false
-MXFP4_MODEL_PATH=""
-LLAMA_SERVER_PORT=8080
-
-detect_blackwell() {
-    if [[ "$GPU_TYPE" != "nvidia" ]]; then
-        return
-    fi
-    
-    local compute_cap
-    compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
-    
-    if [[ "$compute_cap" == "12.0" || "$compute_cap" == "12.1" || "$compute_cap" == "12.2" ]]; then
-        IS_BLACKWELL=true
-        info "Blackwell GPU detected (compute capability ${compute_cap})"
-        info "MXFP4 quantization will be used for 2.5x faster inference"
-    fi
-}
-
-setup_llama_cpp_mxfp4() {
-    if [[ "$IS_BLACKWELL" != true ]]; then
-        return
-    fi
-    
-    step "Setting up llama.cpp with MXFP4 for Blackwell GPU"
-    
-    local llama_dir="$HOME/llama-mxfp4"
-    
-    # Check if already built
-    if [[ -f "${llama_dir}/build/bin/llama-server" ]]; then
-        ok "llama.cpp already built for Blackwell"
-    else
-        # Install CUDA Toolkit 12.9 if needed
-        local nvcc_version
-        nvcc_version=$(nvcc --version 2>/dev/null | grep "release" | sed "s/.*release \([0-9]*\.[0-9]*\).*/\1/")
-        if [[ -z "$nvcc_version" ]] || (( $(echo "$nvcc_version < 12.4" | bc -l) )); then
-            info "Installing CUDA Toolkit 12.9 for Blackwell support..."
-            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-            sudo dpkg -i cuda-keyring_1.1-1_all.deb
-            sudo apt-get update -y
-            sudo apt-get install -y cuda-toolkit-12-9
-            rm -f cuda-keyring_1.1-1_all.deb
-        fi
-        
-        # Clone and build llama.cpp
-        info "Building llama.cpp with Blackwell support..."
-        rm -rf "$llama_dir"
-        git clone https://github.com/ggml-org/llama.cpp.git "$llama_dir"
-        cd "$llama_dir"
-        export PATH=/usr/local/cuda-12.9/bin:$PATH
-        export CUDA_PATH=/usr/local/cuda-12.9
-        cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="120" \
-            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
-        cmake --build build -j$(nproc)
-        cd - > /dev/null
-        ok "llama.cpp built for Blackwell"
-    fi
-    
-    # Download MXFP4 model
-    local model_file="${llama_dir}/SmallThinker-4B-MXFP4.gguf"
-    if [[ -f "$model_file" ]]; then
-        ok "MXFP4 model already downloaded"
-    else
-        info "Downloading SmallThinker-4B MXFP4 model (2.6GB)..."
-        curl -L -o "$model_file" \
-            "https://huggingface.co/noctrex/SmallThinker-4B-A0.6B-Instruct-MXFP4_MOE-GGUF/resolve/main/SmallThinker-4B-A0.6B-Instruct-MXFP4_MOE.gguf?download=true"
-        ok "MXFP4 model downloaded"
-    fi
-    
-    MXFP4_MODEL_PATH="$model_file"
-    
-    # Start llama-server
-    info "Starting llama-server with MXFP4 model..."
-    export PATH=/usr/local/cuda-12.9/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
-    
-    # Kill existing llama-server if running
-    pkill -f "llama-server" 2>/dev/null || true
-    sleep 1
-    
-    "${llama_dir}/build/bin/llama-server" \
-        -m "$MXFP4_MODEL_PATH" \
-        --port $LLAMA_SERVER_PORT \
-        -ngl 99 \
-        -fa \
-        -c 32768 \
-        --host 0.0.0.0 \
-        > /tmp/llama-server.log 2>&1 &
-    
-    # Wait for server to start
-    local sw=0
-    while ! curl -s -o /dev/null http://localhost:${LLAMA_SERVER_PORT}/health 2>/dev/null; do
-        sleep 1
-        sw=$((sw + 1))
-        if [[ $sw -ge 30 ]]; then
-            warn "llama-server startup timed out"
-            return
-        fi
-    done
-    ok "llama-server started on port ${LLAMA_SERVER_PORT}"
-}
