@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 app = FastAPI()
 
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-MODEL = os.environ.get("MUBO_MODEL", "gpt-oss:20b-long")
+MODEL = os.environ.get("MUBO_MODEL", "nemotron-3-nano:4b")
 APP_FILE = Path(__file__).resolve()
 REPO_DIR = APP_FILE.parent.parent  # git repository root
 PLUGINS_DIR = APP_FILE.parent / "plugins"
@@ -30,25 +30,66 @@ WORKSPACE_DIR = Path.home() / "mubo_workspace"
 WORKSPACE_DIR.mkdir(exist_ok=True)
 
 # --- Web Search ---
-def _web_search(query: str, max_results: int = 5) -> str:
-    """Search the web using DuckDuckGo and return results."""
+def _expand_search_query(original_query: str) -> list:
+    """Use LLM to generate better search queries."""
+    import httpx
     try:
-        from duckduckgo_search import DDGS
+        prompt = f"""Generate 3 effective search queries for: "{original_query}"
+Rules:
+- Include year 2026 if relevant to current events  
+- Mix Japanese and English queries if topic is international
+- Be specific and use proper nouns
+Output format: one query per line, no numbering, no explanation."""
+        
+        response = httpx.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={"model": MODEL, "prompt": prompt, "stream": False, "options": {"num_predict": 250}},
+            timeout=30.0
+        )
+        if response.status_code == 200:
+            text = response.json().get("response", "")
+            if "</think>" in text:
+                text = text.split("</think>")[-1]
+            queries = [q.strip().lstrip("0123456789.-) ") for q in text.strip().split("\n") if q.strip() and len(q.strip()) > 3]
+            if queries:
+                return queries[:3]
+    except Exception:
+        pass
+    return [original_query]
+
+
+def _web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo with query expansion."""
+    try:
+        from ddgs import DDGS
+        queries = _expand_search_query(query)
+        all_results = []
+        seen_urls = set()
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-        if not results:
+            for q in queries:
+                try:
+                    results = list(ddgs.text(q, max_results=max_results))
+                    for r in results:
+                        url = r.get("href", "")
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append(r)
+                except Exception:
+                    continue
+        if not all_results:
             return "No results found."
-        output = []
-        for r in results:
+        output = [f"[Searched: {chr(44).join(queries)}]\n"]
+        for r in all_results[:max_results * 2]:
             title = r.get("title", "")
             href = r.get("href", "")
             body = r.get("body", "")
             output.append(f"**{title}**\n{href}\n{body}")
         return "\n\n".join(output)
     except ImportError:
-        return "Error: duckduckgo-search package not installed. Run: uv add duckduckgo-search"
+        return "Error: ddgs package not installed. Run: uv add ddgs"
     except Exception as e:
         return f"Search error: {e}"
+
 
 
 # --- File Operations ---

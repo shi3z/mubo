@@ -31,9 +31,9 @@ UNIFIED_MEM=false
 HAS_NPU=false
 NVIDIA_DOCKER_OK=false
 OLLAMA_INSTALLED=false
-BASE_MODEL="gpt-oss:20b"
-DERIVED_MODEL="gpt-oss:20b-long"
-CTX_LENGTH=65536      # Default 64K
+BASE_MODEL="nemotron-3-nano:4b"
+DERIVED_MODEL="nemotron-3-nano:4b"
+CTX_LENGTH=262144      # Default 64K
 
 # ============================================================
 # Phase 1: Environment Detection
@@ -337,10 +337,10 @@ decide_context_length() {
     fi
 
     if (( available_mem >= 64 )); then
-        CTX_LENGTH=131072   # 128K
+        CTX_LENGTH=262144   # 128K
         info "Sufficient memory (${available_mem}GB): setting 128K context"
     elif (( available_mem >= 32 )); then
-        CTX_LENGTH=65536    # 64K
+        CTX_LENGTH=262144    # 64K
         info "Moderate memory (${available_mem}GB): setting 64K context"
     elif (( available_mem >= 16 )); then
         CTX_LENGTH=32768    # 32K
