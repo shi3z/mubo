@@ -1124,7 +1124,7 @@ main() {
     print_summary
 }
 
-main "$@"
+
 
 # ============================================================
 # Blackwell GPU + MXFP4 Support
@@ -1230,3 +1230,4 @@ setup_llama_cpp_mxfp4() {
     done
     ok "llama-server started on port ${LLAMA_SERVER_PORT}"
 }
+main "$@"
